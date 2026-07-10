@@ -1,0 +1,267 @@
+<div class="post__body topic-body clearfix">
+                
+    <div class="topic-meta-data">
+
+<div class="names trigger-user-card">
+
+<!---->      <span class="first username group--Verified">
+
+<a href="/u/justanotherjim" data-user-card="JustAnotherJim" aria-label="JustAnotherJim's profile" tabindex="0">
+
+JustAnotherJim
+<!---->          
+</a>
+
+</span>
+
+<!---->
+<!---->
+<!---->
+<!---->        <!---->
+
+</div>
+
+
+<div class="post-infos">
+<div class="post-info post-date">
+<a class="post-date" href="/t/how-to-set-up-your-very-own-fake-bank-website-right-on-your-own-machine/87878?u=eokabaits" title="Post date">
+<span class="relative-date" title="Jan 15, 2022 9:31 am" data-time="1642239097363" data-format="tiny">Jan 2022</span>
+</a>
+</div>
+<div class="read-state read" title="Post is unread">
+<svg class="fa d-icon d-icon-circle svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#circle"></use></svg>
+</div>
+</div>
+</div>
+  
+  <div class="post__regular regular post__contents contents">
+    <!---->
+      <div class="cooked"><p dir="auto">If you’re a scambaiter, you’ll occasionally run across a scammer who wants you to log in to your bank account. This tutorial will show you how to set up a basic bank website complete with a domain name, all hosted on your own computer. The best part is that it’s compatible with my scambaiting budget at the low low cost of nothing.</p>
+<p dir="auto"><strong>IMPORTANT:</strong> This tutorial assumes that you have already set up a virtual machine for baiting. If you haven’t set up a virtual machine for baiting, STOP. You shouldn’t be letting scammers remote into your actual machine ever, so get a virtual machine set up first and then come back.</p>
+<p dir="auto"><strong>NOTE:</strong> This tutorial is aimed at Windows users. Specifically, I’m running Windows 10 on both my actual machine and the virtual machine. If you’re using other OSes, your mileage may vary.</p>
+<p dir="auto"><span class="bbcode-u"><strong>PART I: Things to do on your real machine</strong></span></p>
+<p dir="auto">Okay maam, I am going to need for you to open Google Chrome and type in this address. The first step is to download the software that allows you to turn your machine into a web server. To get this software, you head over here:</p>
+<aside class="onebox allowlistedgeneric" data-onebox-src="https://www.apachefriends.org/" dir="auto">
+<header class="source">
+<img src="https://cdn.scammer.info/original/3X/d/d/dd7e5672b7bbdeae1ae8c4aee9a315bd798a77ee.png" class="site-icon" data-dominant-color="FCA56B" width="47" height="48" loading="lazy" style="aspect-ratio: 47 / 48;">
+
+<a href="https://www.apachefriends.org/" target="_blank" rel="noopener nofollow ugc">apachefriends.org</a>
+</header>
+
+<article class="onebox-body">
+
+
+<h3><a href="https://www.apachefriends.org/" target="_blank" rel="noopener nofollow ugc" data-clicks="139" aria-label="XAMPP Installers and Downloads for Apache Friends link clicked 139 times">XAMPP Installers and Downloads for Apache Friends</a></h3>
+
+<p>XAMPP is an easy to install Apache distribution containing MariaDB, PHP and Perl.</p>
+
+
+</article>
+
+<div class="onebox-metadata">
+
+
+</div>
+
+<div style="clear: both"></div>
+</aside>
+
+<p dir="auto">This is the website for XAMPP, a fantastic little webserver-in-a-box that’s pretty much ready to go upon install. Download the installer from the main page, and open it up. Run through all the options. The defaults on everything are just fine. (The only thing I unchecked on the installer was the box to “learn more about XAMPP” on the last install option screen.) It will unpack and install your software. You can go and get a glass of water if you’d like. This will take a moment.</p>
+<p dir="auto">Once the installer is done, go ahead and open the XAMPP control panel. This is where you control what modules are running for your web server using the “Start” buttons on the panel. For our purposes, we only need to start two modules: “Apache” (the web server itself), and “MySQL” for the database we’ll need later on. Start both of these modules, and on the first time you do this, approve their local access through the firewall when prompted.</p>
+<p dir="auto"><strong>PROTIP:</strong> Remember to turn off these modules when you’re not doing baiting-related stuff to minimize access into your computer.</p>
+<p dir="auto">Now you have a webserver running on your machine. Congratulations! To verify it’s working (and to proceed to the next step), open up your web browser and type “localhost” in the navigation bar and hit enter. You should see a “Welcome to XAMPP” page.</p>
+<p dir="auto">At the top of this page, on the right side, there should be a link marked “phpMyAdmin”. Do one thing and click on the link. This will take you to the php Administration page. From there, on the left hand side there is a column that should have “new” at the top. This is where we’re going to create our bank database. Click on new. On the next page, give your database a memorable name, like “bank”. Hit “create” and bask in the glory.</p>
+<p dir="auto">Now you need a username to access your database. To add one, start by clicking on the “home” button or the phyMyAdmin logo to go to the main page. From there, look for the “user accounts” button on the top right side of the page. (Note: if your window is small, this button gets put into a “hamburger” menu on the right half of the page.)</p>
+<p dir="auto">Below the list of existing users, there’s a link to add a new user account. Click this link. Create your username to access the database here as well as a password. Now maam, be handy with a pen and paper. You will want to write down the username and password you use for setting up the bank later. Once you’ve entered this data, scroll down to where you see a checkbox labeled “Global Privileges” and check this box. This gives the user privileges to everything. Finally, scroll to the bottom and hit “go”, thus creating your user.</p>
+<p dir="auto">With your database and user accounts created, it’s time to install your bank software. For this bank, we’re using Dave Smith Johnson and Son. It’s a baiting bank designed to have most of the features you’ll need to fool your scammers. Fire up ye olde browser and navigate to this link:</p>
+<aside class="onebox allowlistedgeneric" data-onebox-src="https://github.com/DSJAS/DSJAS/releases" dir="auto">
+<header class="source">
+<img src="https://github.githubassets.com/favicons/favicon.svg" class="site-icon" width="32" height="32" loading="lazy" style="aspect-ratio: 32 / 32;">
+
+<a href="https://github.com/DSJAS/DSJAS/releases" target="_blank" rel="noopener nofollow ugc">GitHub</a>
+</header>
+
+<article class="onebox-body">
+<img width="640" height="640" src="https://cdn.scammer.info/original/3X/2/4/2457f8c596b18ab3f271ec74061b9c16f46d3918.jpeg" class="thumbnail onebox-avatar" data-dominant-color="4C7B6B" loading="lazy" style="aspect-ratio: 640 / 640;">
+
+<h3><a href="https://github.com/DSJAS/DSJAS/releases" target="_blank" rel="noopener nofollow ugc" data-clicks="1.2k" aria-label="Releases · DSJAS/DSJAS link clicked 1208 times">Releases · DSJAS/DSJAS</a></h3>
+
+<p>DSJAS: Dave Smith Johnson &amp; son. A fake bank for baiting scammers attempting to steal from online banking. - DSJAS/DSJAS</p>
+
+
+</article>
+
+<div class="onebox-metadata">
+
+
+</div>
+
+<div style="clear: both"></div>
+</aside>
+
+<p dir="auto">The top of the page will have the latest and greatest version of the software. At the time of this tutorial release, the latest version is beta v 0.1.2. I’ll be using this version for the tutorial. At the bottom of the release notes for the most recent version, there’s an “assets” dropdown. Download the most recent zip file from this release (for version 0.1.2 it’s the file “DSJAS-relese-beta.zip”.)</p>
+<p dir="auto">With the bank downloaded, go into your downloads folder and unzip the bank files. Now, on your computer navigate to “c:\xampp\htdocs” (assuming you didn’t change the directory location on install of XAMPP). This folder is where your webserver serves pages from. We need to make room for your bank. Create a new folder and name it something like “old” and drag everything that was in this folder into it. That allows you to restore those pages should something go terribly wrong later.</p>
+<p dir="auto">With all the original files in your web server folder sent to storage, it’s time to put your bank files in there. Go to your unzipped copy of the bank files, open the folder, and drag everything (including folders) from that directory over to the c:\xampp\htdocs directory. Now we’re ready to set up your bank!</p>
+<p dir="auto">Leave the web server folder open and go back into your web browser. Type “localhost” in the URL box and hit enter. If all goes well, you should see the setup page for DSJAS. Besides being the start page for the process, this also creates a file in your webserver folder called “setuptoken.txt”. Go into that file and copy the token. You’ll need it for the next step.</p>
+<p dir="auto">Once you’ve copied the token, go back to the web browser, and at the bottom of the DSJAS page you’ll see a blue link labeled “Continue to verification”. Click that link, and on the next page, paste in your token and hit “confirm”. This will take you to the next page, where you’ll set up the database.</p>
+<p dir="auto">Remember that pen and paper you had handy earlier sir? We need the database name, username, and password now. For your server hostname, enter localhost, and populate the other three fields with the info you took down. Hit the blue “Confirm and setup” button, and if you entered the data correctly, you’ll be magically whisked off to the final step, setting up your admin user account for the bank admin page.</p>
+<p dir="auto">On the left side of this page, you’ll see boxes to fill in your admin username, email, password, and password hint. Fill out all of them. Then on the right, enter the name of your bank. This shows up on the website. Below that, you can leave the URL blank for now. DO NOT check the “disable admin dashboard” option. Scroll to the bottom and hit the blue “Complete Setup” button. Victory! Your bank is set up!</p>
+<p dir="auto"><span class="bbcode-u"><strong>PART II: Setting up and customizing your bank.</strong></span></p>
+<p dir="auto"><em>This page intentionally left blank.</em></p>
+<p dir="auto">No, really, there’s some great documentation on the bank, and you can totally learn by reading that and/or experimenting. This tutorial is aimed at getting the bank up and running on your VM, so I’ll skip telling you how your bank should look and leave that up to you. Because you’re good enough, you’re smart enough, and doggonit, people like you.</p>
+<p dir="auto"><span class="bbcode-u"><strong>PART III: Things to do inside your VM</strong></span></p>
+<p dir="auto">In Part I we set up the bank and got it running on your actual machine. Now we need to find it on your virtual machine and make it look legit. Fire up you’re virtual machine: we’re going in!</p>
+<p dir="auto">Once your VM is loaded, click on the start menu and type “View Network Connections” and press enter. This will open up a window showing you your connection to the Internet. (In my VM it appears as an ethernet connection. Your Mileage may vary.)</p>
+<p dir="auto">Now, do one thing and double click on your network connection, and you should see a button that says “details”. Click on this, and look for the IP address of your IPv4 Default Gateway. On my VM, this address is 10.0.2.2, but I have no idea if that’s universal on all VM’s.</p>
+<p dir="auto">At any rate, from within your virtual machine you can type the default gateway IP address into your browser and so long as your XAMPP server is running on the actual machine, you’ll see your fake bank.</p>
+<p dir="auto">Woo hoo! We found the bank. Now to make the URL look a little more legit. Nobody would fear the dread pirate Westley, and no scammer would believe 10.0.2.2 is your bank’s web address. So it’s time to use our hosts file to give your bank a legit address.</p>
+<p dir="auto">Click on your start menu again, and this time type the word “notepad” but don’t press enter. At the top of the window you’ll see your “Notepad.exe” app. Right click on it, and select “run as administrator”. This will prompt you for the admin password (if any) and open notepad.</p>
+<p dir="auto">Go to File &gt;&gt; Open, and navigate to c:\Windows\System32\drivers\etc. If the folder appears empty, change the “File Type” box to “All Files”. You should see a file named “hosts”. Open this file.</p>
+<p dir="auto">If you don’t know, the hosts file is like a mini DNS that your computer looks at BEFORE hitting the internet to look up an address. This means that you can mask an IP entry to appear as a web URL from this file. In other words, we can take your 10.0.2.2 (or whatever IP address your gateway is at) and turn it into <a href="http://anythingwewant.com" rel="noopener nofollow ugc" data-clicks="60" aria-label="anythingwewant.com link clicked 60 times">anythingwewant.com</a>.</p>
+<p dir="auto">So for example, if your gateway IP is 10.0.2.2 and you want your bank to show up at the web address “<a href="http://abcbank.com" rel="noopener nofollow ugc" data-clicks="215" aria-label="abcbank.com link clicked 215 times">abcbank.com</a>” or “<a href="http://www.abcbank.com" rel="noopener nofollow ugc" data-clicks="133" aria-label="www.abcbank.com link clicked 133 times">www.abcbank.com</a>” you would add these two lines to the bottom of your hosts file:</p>
+<p dir="auto">10.0.2.2 <a href="http://abcbank.com" rel="noopener nofollow ugc" data-clicks="215" aria-label="abcbank.com link clicked 215 times">abcbank.com</a><br>
+10.0.2.2 <a href="http://www.abcbank.com" rel="noopener nofollow ugc" data-clicks="133" aria-label="www.abcbank.com link clicked 133 times">www.abcbank.com</a></p>
+<p dir="auto">Save and close your hosts file, and now when you go to a browser in your virtual machine, you should be able to type in the URL you made for your bank and like magic, it takes you to your fake bank. Awesome sauce!</p>
+<p dir="auto">But wait, there’s one problem.</p>
+<p dir="auto">If you do all of this, you might notice that to the left of your bank URL it very plainly says “Not secure” or the like and maybe it even throws a big warning icon. We need to do something about that. There’s a “hard way” (setting up a site certificate) that is technically better, but there’s an easy way to fix this, at least in chrome.</p>
+<p dir="auto">In the chrome browser, open a tab and type in “chrome://flags”. This brings up some neat power tools for the chrome browser. At the top of the page in the search box, type in “insecure”. Now look for the section titled “Insecure origins treated as secure”. This feature will make it far less obvious that your site is not secure. Click the button on the right to enable the feature, then type in the full url’s - including the “http://” part into the textbox. Do this for both the URL with and without the “www” prefix, and separate them with a comma.</p>
+<p dir="auto">With this done, click on the button to relaunch chrome, and go to your URL. Now the “Not Secure” warning is replaced by a much less noticeable icon. It’s still not the little padlock that denotes a secure site, but it’s less likely to be noticed by your scammers peeking in on your virtual machine.</p>
+<p dir="auto">And that’s all there is to it! I know this was a lot of words, so hopefully I didn’t lose you. I’ve been toying with starting a baiting YouTube channel and if I do, I’ll create a video version of this tutorial unless someone better suited beats me to it.</p>
+<p dir="auto">Happy baiting and good luck with each and every thing!</p><div class="cooked-selection-barrier" aria-hidden="true"><br></div></div><!---->
+    <!----><!----><!---->
+
+<!---->
+<!---->
+<!---->
+    <section class="post__menu-area post-menu-area clearfix" role="group" aria-label="Post actions">
+      <!---->
+<nav class="post-controls collapsed" role="none">
+<div class="reactions-actions-summary">
+<div id="discourse-reactions-actions-243221-left" class="discourse-reactions-actions has-reactions can-toggle-reaction">
+<!---->
+<div id="discourse-reactions-counter-243221-left" class="only-like discourse-reactions-counter" role="button" tabindex="0" aria-label="28 reactions">
+<div class="discourse-reactions-list">
+<div class="reactions">
+<div class="discourse-reactions-list-emoji" id="discourse-reactions-list-emoji-243221-heart">
+<img width="20" height="20" src="/images/emoji/noto/heart.png?v=15" alt="heart" class="emoji">
+</div>
+
+</div>
+</div>
+
+<span class="reactions-counter" aria-hidden="true">
+28
+</span>
+</div>
+
+</div>
+</div>
+
+
+<button class="btn post-action-menu__show-replies show-replies btn-icon-text btn-flat" aria-expanded="false" aria-pressed="false" aria-label="This post has 5 replies" type="button">
+<!----><span class="d-button-label">5 Replies<!----></span>
+<svg class="fa d-icon d-icon-chevron-down svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#chevron-down"></use></svg>
+
+<!----></button>
+
+<div class="actions">
+<!---->
+<div class="discourse-reactions-actions-button-shim">
+<div id="discourse-reactions-actions-243221-right" class="discourse-reactions-actions has-reactions can-toggle-reaction">
+<!---->
+<div class="discourse-reactions-reaction-button" title="Like this post">
+<button class="btn no-text btn-icon btn-toggle-reaction-like btn-flat btn-icon no-text reaction-button" title="Like this post" type="button">
+<svg class="fa d-icon d-icon-d-unliked svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#far-heart"></use></svg>  <span aria-hidden="true">
+​
+</span>
+
+<!----></button>
+</div>
+</div>
+</div>
+
+<button class="btn no-text btn-icon post-action-menu__copy-link btn-flat" title="copy a link to this post to clipboard" aria-label="copy a link to this post to clipboard" type="button">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>  <span aria-hidden="true">
+​
+</span>
+
+<!----></button>
+
+<!---->
+<!---->
+<!---->
+<button class="btn no-text btn-icon post-action-menu__show-more show-more-actions btn-flat" title="show more" aria-label="show more" type="button">
+<svg class="fa d-icon d-icon-ellipsis svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#ellipsis"></use></svg>  <span aria-hidden="true">
+​
+</span>
+
+<!----></button>
+
+<button class="btn btn-icon-text post-action-menu__reply reply create fade-out btn-flat" title="begin composing a reply to this post" aria-label="Reply to post #1 by @JustAnotherJim" type="button">
+<svg class="fa d-icon d-icon-reply svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#reply"></use></svg>  <span class="d-button-label">Reply<!----></span>
+
+<!----></button>
+
+</div>
+</nav>
+
+<div class="small-user-list  who-read">
+<span class="small-user-list-content" role="list" aria-live="polite" aria-atomic="true">
+<!---->    </span>
+</div>
+
+
+<!---->
+<!----><!----><!---->
+
+    </section>
+
+<!---->                </div>
+
+  <section class="post__actions post-actions">
+    <!----><!---->
+  </section>
+  
+      <div class="post-links-container">
+<ul class="post-links">
+<li>
+<a class="track-link inbound" data-clicks="90" href="https://scammer.info/t/reverse-pc-access/97700/6">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>
+<span> Reverse PC Access</span>
+</a>
+</li>
+<li>
+<a class="track-link inbound" data-clicks="27" href="https://scammer.info/t/how-to-make-a-fake-bank/108661/2">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>
+<span> How to make a fake bank?</span>
+</a>
+</li>
+<li>
+<a class="track-link inbound" data-clicks="15" href="https://scammer.info/t/what-are-some-good-fake-bank-recommendations-im-new-to-scambaiting/86552/15">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>
+<span> What are some good fake bank recommendations? im new to scambaiting</span>
+</a>
+</li>
+<li>
+<a class="track-link inbound" data-clicks="7" href="https://scammer.info/t/new-into-scambaiting-and-want-some-tips/106290/2">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>
+<span> New into scambaiting and want some tips!</span>
+</a>
+</li>
+<li>
+<a class="track-link inbound" data-clicks="2" href="https://scammer.info/t/geek-squad-renewal-refund-8508466947/98449/24">
+<svg class="fa d-icon d-icon-link svg-icon fa-width-auto svg-string" width="1em" height="1em" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#link"></use></svg>
+<span> Geek squad renewal refund 8508466947</span>
+</a>
+</li>
+<li>
+<button class="btn btn-transparent expand-links" title="expand more links for this post" type="button">
+<!----><span class="d-button-label">1 more<!----></span>
+
+<!----></button>
+</li>
+</ul>
+</div>
+
+  
+</div>

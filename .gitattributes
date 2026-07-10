@@ -1,0 +1,16 @@
+# Normalize line endings for scripts / docs
+*.ps1 text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.conf text eol=lf
+.gitignore text eol=lf
+
+# Keep binary assets as binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.bmp binary
+*.webp binary
+*.mp4 binary
+*.zip binary
+*.exe binary

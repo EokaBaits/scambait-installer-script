@@ -1,0 +1,53 @@
+# --- OS / editor ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+*.code-workspace
+
+# --- logs / temp / local downloads ---
+logs/
+*.log
+*.tmp
+*.temp
+ScambaitInstall/
+
+# Runtime downloads (script fetches these on the VM)
+assets/tools/
+**/xampp*.exe
+**/DSJAS*.zip
+**/*FuckScreenConnect*.zip
+**/*NoBlockInput*.zip
+**/*noblock*.zip
+
+# --- secrets / local overrides (keep out of git) ---
+.env
+*.pem
+*.pfx
+secrets/
+local.ps1
+config.local.ps1
+
+# --- obsolete multi-file layout (logic is inside Install-Scambait.ps1) ---
+modules/
+config.ps1
+
+# --- media: track small images; ignore huge dumps by default ---
+# Wallpapers / camera video ARE intended to be committed when reasonable size.
+# Uncomment the next line if your webcam video is huge and you use Git LFS or Releases instead:
+# assets/camera/*.mp4
+
+# Ignore accidental bulk photo dumps outside the intended folders
+*.iso
+*.vhd
+*.vhdx
+*.qcow2
+
+# --- Python / build junk if you seed history locally ---
+__pycache__/
+*.pyc
+.venv/
+venv/
