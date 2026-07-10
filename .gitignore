@@ -16,7 +16,8 @@ logs/
 ScambaitInstall/
 
 # Runtime downloads (script fetches these on the VM)
-assets/tools/
+assets/tools/*
+!assets/tools/.gitkeep
 **/xampp*.exe
 **/DSJAS*.zip
 **/*FuckScreenConnect*.zip
