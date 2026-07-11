@@ -2699,6 +2699,40 @@ End Sub
 
 
 #region Install-XamppDsjas
+function Install-XamppFromPortableArchive {
+    param($XamppConfig, [string]$ToolsDir)
+    if (-not $XamppConfig.PortableUrl) {
+        throw 'No PortableUrl configured for XAMPP'
+    }
+    Write-Log 'Installing XAMPP from portable .7z (most reliable for automation)...' 'INFO'
+    $portableArc = Join-Path $ToolsDir 'xampp-portable.7z'
+    $needDl = $script:Force -or -not (Test-Path $portableArc) -or ((Get-Item $portableArc -ErrorAction SilentlyContinue).Length -lt 50MB)
+    if ($needDl) {
+        Download-File -Url $XamppConfig.PortableUrl -OutFile $portableArc -MinBytes 50000000
+    }
+    $extractTmp = Join-Path $script:WorkDir 'xampp-extract'
+    Expand-ArchiveSafe -Archive $portableArc -Dest $extractTmp
+    $found = Get-ChildItem $extractTmp -Recurse -Filter 'xampp-control.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $found) { throw 'Portable archive extracted but xampp-control.exe not found' }
+    $srcRoot = $found.DirectoryName
+    Ensure-Dir (Split-Path $XamppConfig.InstallDir -Parent)
+    if (Test-Path $XamppConfig.InstallDir) {
+        # Don't wipe a partial good tree if control already exists
+        if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
+            Remove-Item $XamppConfig.InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
+        # Robocopy-ish: copy contents into InstallDir
+        New-Item -ItemType Directory -Path $XamppConfig.InstallDir -Force | Out-Null
+        Copy-Item (Join-Path $srcRoot '*') $XamppConfig.InstallDir -Recurse -Force
+    }
+    if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
+        throw "Portable XAMPP copy failed into $($XamppConfig.InstallDir)"
+    }
+    Write-Log "XAMPP portable staged at $($XamppConfig.InstallDir)" 'OK'
+}
+
 function Install-ScambaitXamppDsjas {
     Write-Log 'Installing XAMPP + DSJAS (fake bank) per guide...' 'INFO'
     $x = $script:Config.Xampp
@@ -2710,7 +2744,7 @@ function Install-ScambaitXamppDsjas {
     if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
         $installer = Join-Path $tools $x.InstallerName
         $local = Get-ChildItem $tools -Filter 'xampp*.exe' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -gt 50MB } |
+            Where-Object { $_.Length -gt 50MB -and $_.Name -notmatch 'portable' } |
             Select-Object -First 1
         if ($local) { $installer = $local.FullName }
 
@@ -2722,55 +2756,69 @@ function Install-ScambaitXamppDsjas {
             if ($x.DownloadUrlAlt) { $urls += $x.DownloadUrlAlt }
             $urls = $urls | Where-Object { $_ } | Select-Object -Unique
             $min = if ($x.MinBytes) { [long]$x.MinBytes } else { 100000000 }
-            $ok = $false
             foreach ($url in $urls) {
                 try {
                     Download-File -Url $url -OutFile $installer -MinBytes $min
-                    $ok = $true
                     break
                 }
                 catch {
                     Write-Log "XAMPP URL failed: $($_.Exception.Message)" 'WARN'
                 }
             }
+        }
 
-            # Portable 7z fallback (no NSIS installer needed)
-            if (-not $ok -and $x.PortableUrl) {
-                try {
-                    Write-Log 'Trying XAMPP portable .7z fallback...' 'INFO'
-                    $portableArc = Join-Path $tools 'xampp-portable.7z'
-                    Download-File -Url $x.PortableUrl -OutFile $portableArc -MinBytes 50000000
-                    $extractTmp = Join-Path $script:WorkDir 'xampp-extract'
-                    Expand-ArchiveSafe -Archive $portableArc -Dest $extractTmp
-                    $found = Get-ChildItem $extractTmp -Recurse -Filter 'xampp-control.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if (-not $found) { throw 'Portable archive extracted but xampp-control.exe not found' }
-                    $srcRoot = $found.DirectoryName
-                    Ensure-Dir (Split-Path $x.InstallDir -Parent)
-                    if (Test-Path $x.InstallDir) { Remove-Item $x.InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
-                    Copy-Item $srcRoot $x.InstallDir -Recurse -Force
-                    $ok = $true
-                    Write-Log "XAMPP portable staged at $($x.InstallDir)" 'OK'
+        # 1) Bitnami/InstallBuilder silent flags (NOT NSIS /S)
+        if ((Test-Path $installer) -and ((Get-Item $installer).Length -gt 50MB) -and
+            -not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+            Write-Log 'Running XAMPP Bitnami unattended install...' 'INFO'
+            $argSets = @(
+                @(
+                    '--mode', 'unattended',
+                    '--unattendedmodeui', 'none',
+                    '--launchapps', '0',
+                    '--disable-components', 'xampp_mercury,xampp_tomcat,xampp_filezilla,xampp_webalizer',
+                    '--prefix', $x.InstallDir
+                )
+                @(
+                    '--mode', 'unattended',
+                    '--unattendedmodeui', 'none',
+                    '--launchapps', '0'
+                )
+            )
+            foreach ($args in $argSets) {
+                if (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) { break }
+                # Also accept default C:\xampp if that is our target or we can relocate
+                $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+                Write-Log "XAMPP unattended exit $($p.ExitCode) (args: $($args -join ' '))" 'INFO'
+                Start-Sleep 2
+                # Bitnami often ignores --prefix and always uses C:\xampp
+                if ((Test-Path 'C:\xampp\xampp-control.exe') -and $x.InstallDir -ne 'C:\xampp') {
+                    Write-Log "XAMPP landed in C:\xampp (Bitnami default); updating InstallDir expectation" 'WARN'
+                    $x.InstallDir = 'C:\xampp'
+                    $script:Config.Xampp.InstallDir = 'C:\xampp'
                 }
-                catch {
-                    Write-Log "XAMPP portable fallback failed: $($_.Exception.Message)" 'WARN'
-                }
-            }
-
-            if (-not $ok -and -not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-                throw 'XAMPP download failed from all mirrors. Manually download from https://www.apachefriends.org/ into the tools folder as xampp-installer.exe'
             }
         }
 
-        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-            if (-not (Test-Path $installer) -or ((Get-Item $installer).Length -lt 50MB)) {
-                throw 'XAMPP installer missing or corrupt (too small). Place a real installer EXE in the tools folder.'
+        # 2) Portable .7z fallback when EXE install fails (exit 1 / missing files)
+        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and
+            -not (Test-Path 'C:\xampp\xampp-control.exe') -and
+            -not $script:SkipDownloads) {
+            try {
+                Install-XamppFromPortableArchive -XamppConfig $x -ToolsDir $tools
             }
+            catch {
+                Write-Log "XAMPP portable fallback failed: $($_.Exception.Message)" 'WARN'
+            }
+        }
 
-            Write-Log 'Running XAMPP silent-ish install (may show UI on some builds)...' 'INFO'
-            # XAMPP NSIS installer: /S silent, dir via /D=
-            $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$($x.InstallDir)" -Wait -PassThru
-            Write-Log "XAMPP installer exit code: $($p.ExitCode)" 'INFO'
-            Start-Sleep 3
+        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and (Test-Path 'C:\xampp\xampp-control.exe')) {
+            $x.InstallDir = 'C:\xampp'
+            $script:Config.Xampp.InstallDir = 'C:\xampp'
+        }
+
+        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+            throw 'XAMPP does not appear installed. Re-run with -Force, or place xampp-installer.exe / extract portable into C:\xampp'
         }
     }
     else {
