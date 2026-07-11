@@ -4,19 +4,23 @@
 # Edit the $Config block below, then run as Administrator:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force
 #   .\Install-Scambait.ps1
-# Optional: -SkipDownloads
+# Optional: -SkipDownloads  -Force (re-run steps even if already completed)
 # Host SMBIOS masking still must be applied on the Proxmox node (see Desktop readme).
 
 param(
-    [switch]$SkipDownloads
+    [switch]$SkipDownloads,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Continue'
 $script:Root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $script:Root) { $script:Root = (Get-Location).Path }
 $script:SkipDownloads = $SkipDownloads
+$script:Force = $Force
 $script:WorkDir = Join-Path $env:TEMP 'ScambaitInstall'
 $script:LogFile = Join-Path $script:WorkDir 'install.log'
+$script:StateDir = Join-Path $env:ProgramData 'Scambait'
+$script:StatePath = Join-Path $script:StateDir 'state.json'
 
 # =============================================================================
 # CONFIG - edit this section only (persona / toggles)
@@ -66,6 +70,17 @@ $script:Config = @{
         LogFile       = 'install.log'
     }
 
+    # Discreet webcam bait: hidden feeder + virtual cam named like a real laptop camera.
+    # Do NOT use OBS Studio (obvious in Task Manager / Start Menu).
+    Camera = @{
+        DeviceName   = 'HP HD Camera'
+        InstallDir   = 'C:\Program Files\HP\HP Image Foundation'
+        VideoFile    = 'assets\camera\webcam_loop.mp4'
+        TaskName     = 'HP Image Foundation'
+        # Unity Capture registers a custom-named DirectShow cam; pyvirtualcam feeds it headlessly
+        UnityCaptureApi = 'https://api.github.com/repos/schellingb/UnityCapture/releases/latest'
+    }
+
     # If assets\ is missing (script-only copy), download these from your GitHub repo.
     # Set Owner/Repo to yours. Leave Owner blank to skip remote asset sync.
     # Keep images small; videos over ~50MB: use Git LFS or a Release asset URL instead.
@@ -83,13 +98,14 @@ $script:Config = @{
     }
 
     # Programs a 62-year-old Chicago retiree (or his kids) would plausibly install
+    # Optional DownloadUrl = direct installer when winget has no package (e.g. Skype)
     WingetPackages = @(
         @{ Id = 'Google.Chrome'; Name = 'Google Chrome' }
         @{ Id = 'Adobe.Acrobat.Reader.64-bit'; Name = 'Adobe Acrobat Reader' }
         @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player' }
-        @{ Id = 'WinRAR.WinRAR'; Name = 'WinRAR' }
+        @{ Id = 'RARLab.WinRAR'; Name = 'WinRAR' }
         @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
-        @{ Id = 'Microsoft.Skype'; Name = 'Skype' }
+        @{ Id = 'Skype.Desktop'; Name = 'Skype'; DownloadUrl = 'https://go.skype.com/windows.desktop.download'; InstallerName = 'SkypeSetup.exe' }
         @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner' }
         @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes' }
         @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice' }
@@ -137,8 +153,11 @@ $script:Config = @{
 
     Xampp = @{
         InstallDir      = 'C:\xampp'
-        DownloadUrl     = 'https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download'
+        # Prefer direct SourceForge CDN (avoids HTML interstitial from /download pages)
+        DownloadUrl     = 'https://downloads.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe'
+        DownloadUrlAlt  = 'https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download'
         InstallerName   = 'xampp-installer.exe'
+        MinBytes        = 100000000
         DsjasReleaseApi = 'https://api.github.com/repos/DSJAS/DSJAS/releases/latest'
     }
 
@@ -162,6 +181,8 @@ $script:Config = @{
         InstallXamppDsjas        = $true
         MaskVmArtifacts          = $true
         SetComputerName          = $true
+        SetTimezone              = $true
+        SetChromeDefaults        = $true
     }
 }
 
@@ -186,15 +207,108 @@ function Test-Feature {
     return [bool]$script:Config.Features[$Name]
 }
 
+function Get-ScambaitState {
+    if (-not (Test-Path $script:StatePath)) {
+        return @{ Completed = @{} }
+    }
+    try {
+        $obj = Get-Content $script:StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $map = @{}
+        if ($obj.Completed) {
+            $obj.Completed.PSObject.Properties | ForEach-Object { $map[$_.Name] = $_.Value }
+        }
+        return @{ Completed = $map }
+    }
+    catch {
+        return @{ Completed = @{} }
+    }
+}
+
+function Test-ScambaitStepDone {
+    param([string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Key)) { return $false }
+    if ($script:Force) { return $false }
+    $state = Get-ScambaitState
+    return [bool]$state.Completed[$Key]
+}
+
+function Set-ScambaitStepDone {
+    param([string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Key)) { return }
+    if (-not (Test-Path $script:StateDir)) {
+        New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null
+    }
+    $state = Get-ScambaitState
+    $state.Completed[$Key] = (Get-Date).ToString('o')
+    $jsonObj = [ordered]@{ Completed = [ordered]@{} }
+    foreach ($k in ($state.Completed.Keys | Sort-Object)) {
+        $jsonObj.Completed[$k] = $state.Completed[$k]
+    }
+    ($jsonObj | ConvertTo-Json -Depth 5) | Set-Content $script:StatePath -Encoding UTF8
+}
+
+function Test-WingetPackageInstalled {
+    param([string]$Id)
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { return $false }
+    $old = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        $out = winget list --id $Id -e --accept-source-agreements 2>&1 | Out-String
+        if ($out -match [regex]::Escape($Id)) { return $true }
+        # Fallback: common install paths
+        switch -Regex ($Id) {
+            'Google\.Chrome' { return Test-Path "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe" }
+            'VideoLAN\.VLC' { return (Test-Path "${env:ProgramFiles}\VideoLAN\VLC\vlc.exe") -or (Test-Path "${env:ProgramFiles(x86)}\VideoLAN\VLC\vlc.exe") }
+            'Adobe\.Acrobat' { return (Test-Path "${env:ProgramFiles}\Adobe\Acrobat DC\Acrobat\Acrobat.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe") }
+            'Zoom\.Zoom' { return Test-Path "${env:ProgramFiles}\Zoom\bin\Zoom.exe" }
+            'Skype|Microsoft\.Skype' { return (Test-Path "${env:ProgramFiles}\Microsoft\Skype for Desktop\Skype.exe") -or (Test-Path "${env:LOCALAPPDATA}\Microsoft\Skype for Desktop\Skype.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Microsoft\Skype for Desktop\Skype.exe") }
+            'RARLab\.WinRAR|WinRAR' { return (Test-Path "${env:ProgramFiles}\WinRAR\WinRAR.exe") -or (Test-Path "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe") }
+            'Piriform\.CCleaner' { return Test-Path "${env:ProgramFiles}\CCleaner\CCleaner.exe" }
+            'Malwarebytes' { return Test-Path "${env:ProgramFiles}\Malwarebytes\Anti-Malware\MBAMService.exe" }
+            'LibreOffice' { return Test-Path "${env:ProgramFiles}\LibreOffice\program\soffice.exe" }
+            'Dropbox' { return Test-Path "${env:ProgramFiles}\Dropbox\Client\Dropbox.exe" }
+            'Google\.GoogleDrive|GoogleDrive' { return (Test-Path "${env:ProgramFiles}\Google\Drive File Stream\googledrivesync.exe") -or (Test-Path "${env:ProgramFiles}\Google\Drive\googledrivesync.exe") }
+            'Amazon\.Kindle' { return Test-Path "${env:LOCALAPPDATA}\Amazon\Kindle\application\Kindle.exe" }
+            default { return $false }
+        }
+    }
+    finally {
+        $ProgressPreference = $old
+    }
+}
+
 function Invoke-Step {
-    param([string]$Name, [string]$Feature, [scriptblock]$Action)
+    param(
+        [string]$Name,
+        [string]$Feature,
+        [scriptblock]$Action,
+        [string]$OnceKey,
+        [scriptblock]$IsInstalled
+    )
     if (-not [string]::IsNullOrWhiteSpace($Feature) -and -not (Test-Feature $Feature)) {
         Write-Log "Skipped (disabled in config): $Name" 'WARN'
         return
     }
+    if (-not $script:Force) {
+        if ($OnceKey -and (Test-ScambaitStepDone $OnceKey)) {
+            Write-Log "Skipped (already completed): $Name" 'OK'
+            return
+        }
+        if ($IsInstalled) {
+            try {
+                if (& $IsInstalled) {
+                    Write-Log "Skipped (already installed/present): $Name" 'OK'
+                    if ($OnceKey) { Set-ScambaitStepDone $OnceKey }
+                    return
+                }
+            }
+            catch {}
+        }
+    }
     Write-Log "=== $Name ===" 'INFO'
     try {
         & $Action
+        if ($OnceKey) { Set-ScambaitStepDone $OnceKey }
         Write-Log "Completed: $Name" 'OK'
     }
     catch {
@@ -301,7 +415,8 @@ function Download-File {
     param(
         [string]$Url,
         [string]$OutFile,
-        [string]$UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ScambaitInstaller/1.0'
+        [string]$UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        [long]$MinBytes = 0
     )
     Ensure-Dir (Split-Path $OutFile -Parent)
     Write-Log "Downloading: $Url" 'INFO'
@@ -309,37 +424,133 @@ function Download-File {
     $oldProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UserAgent $UserAgent -UseBasicParsing
+        # Remove prior bad/partial download
+        if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UserAgent $UserAgent -UseBasicParsing -MaximumRedirection 10
     }
     finally {
         $ProgressPreference = $oldProgress
     }
     if (-not (Test-Path $OutFile)) { throw "Download failed: $Url" }
+    $len = (Get-Item $OutFile).Length
+    if ($MinBytes -gt 0 -and $len -lt $MinBytes) {
+        # SourceForge often returns a tiny HTML interstitial instead of the binary
+        $head = Get-Content $OutFile -TotalCount 5 -ErrorAction SilentlyContinue | Out-String
+        Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+        throw "Download too small ($len bytes, need >= $MinBytes). Likely HTML interstitial. Head: $($head.Substring(0, [Math]::Min(120, $head.Length)))"
+    }
+    # Reject obvious HTML error pages saved as .exe/.zip
+    $fs = [IO.File]::OpenRead($OutFile)
+    try {
+        $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte()
+    }
+    finally { $fs.Close() }
+    $ext = [IO.Path]::GetExtension($OutFile).ToLowerInvariant()
+    if ($ext -eq '.exe' -and -not ($b0 -eq 0x4D -and $b1 -eq 0x5A)) {
+        Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+        throw "Downloaded file is not a Windows EXE (missing MZ header): $OutFile"
+    }
+    if ($ext -eq '.zip' -and -not ($b0 -eq 0x50 -and $b1 -eq 0x4B)) {
+        Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+        throw "Downloaded file is not a ZIP: $OutFile"
+    }
+    if ($ext -eq '.7z' -and -not ($b0 -eq 0x37 -and $b1 -eq 0x7A)) {
+        Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+        throw "Downloaded file is not a 7z archive: $OutFile"
+    }
+    Write-Log "Download OK ($([math]::Round($len/1MB,1)) MB): $(Split-Path $OutFile -Leaf)" 'OK'
 }
 
+function Get-SevenZip {
+    $cands = @(
+        "${env:ProgramFiles}\7-Zip\7z.exe"
+        "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+        "${env:ProgramFiles}\WinRAR\UnRAR.exe"
+        "${env:ProgramFiles}\WinRAR\WinRAR.exe"
+        "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe"
+    )
+    foreach ($c in $cands) { if (Test-Path $c) { return $c } }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Log 'Installing 7-Zip for archive extraction...' 'INFO'
+        winget install --id 7zip.7zip -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        foreach ($c in @("${env:ProgramFiles}\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
+            if (Test-Path $c) { return $c }
+        }
+    }
+    return $null
+}
+
+function Expand-ArchiveSafe {
+    param([string]$Archive, [string]$Dest)
+    if (-not (Test-Path $Archive)) { throw "Archive missing: $Archive" }
+    Ensure-Dir $Dest
+    $ext = [IO.Path]::GetExtension($Archive).ToLowerInvariant()
+
+    # Prefer 7-Zip/WinRAR for .7z and for zips that use unsupported methods (LZMA/Deflate64)
+    $seven = Get-SevenZip
+    if ($seven) {
+        Write-Log "Extracting with $(Split-Path $seven -Leaf)..." 'INFO'
+        if ($seven -match 'UnRAR\.exe$') {
+            & $seven x -y -o"$Dest" -- $Archive | Out-Null
+        }
+        elseif ($seven -match 'WinRAR\.exe$') {
+            & $seven x -y -o"$Dest" -- $Archive | Out-Null
+        }
+        else {
+            & $seven x -y "-o$Dest" -- $Archive | Out-Null
+        }
+        $any = Get-ChildItem $Dest -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($any) { return }
+    }
+
+    if ($ext -eq '.zip') {
+        try {
+            Expand-Archive -Path $Archive -DestinationPath $Dest -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            Write-Log "Expand-Archive failed ($($_.Exception.Message)); need 7-Zip for this zip" 'WARN'
+        }
+        # Windows tar can extract some zips
+        $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+        if ($tar) {
+            & tar.exe -xf $Archive -C $Dest 2>$null
+            $any = Get-ChildItem $Dest -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($any) { return }
+        }
+    }
+
+    throw "Could not extract $Archive. Install 7-Zip and re-run."
+}
+
+# Back-compat alias used by older call sites
 function Expand-ZipSafe {
     param([string]$Zip, [string]$Dest)
-    Ensure-Dir $Dest
-    Expand-Archive -Path $Zip -DestinationPath $Dest -Force
+    Expand-ArchiveSafe -Archive $Zip -Dest $Dest
 }
 
 function Get-GithubLatestAsset {
     param(
         [string]$ApiUrl,
-        [string]$NameMatch = '\.zip$'
+        [string[]]$NameMatch = @('\.7z$', '\.zip$')
     )
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $headers = @{ 'User-Agent' = 'ScambaitInstaller'; 'Accept' = 'application/vnd.github+json' }
     $release = Invoke-RestMethod -Uri $ApiUrl -Headers $headers
-    $asset = $release.assets | Where-Object { $_.name -match $NameMatch } | Select-Object -First 1
-    if (-not $asset) { throw "No matching asset on $ApiUrl" }
-    return @{
-        Name        = $asset.name
-        Url         = $asset.browser_download_url
-        Tag         = $release.tag_name
-        Body        = $release.body
-        ZipballUrl  = $release.zipball_url
+    foreach ($pat in $NameMatch) {
+        $asset = $release.assets | Where-Object { $_.name -match $pat } | Select-Object -First 1
+        if ($asset) {
+            return @{
+                Name       = $asset.name
+                Url        = $asset.browser_download_url
+                Tag        = $release.tag_name
+                Body       = $release.body
+                ZipballUrl = $release.zipball_url
+            }
+        }
     }
+    $names = ($release.assets | ForEach-Object { $_.name }) -join ', '
+    throw "No matching asset on $ApiUrl (have: $names)"
 }
 
 function Get-DefaultGatewayIPv4 {
@@ -835,65 +1046,252 @@ function Add-ScambaitFakePrinter {
 
 #region Setup-CameraLoop
 function Setup-ScambaitCameraLoop {
-    Write-Log 'Setting up webcam loop bait...' 'INFO'
+    Write-Log 'Setting up discreet webcam loop (no OBS)...' 'INFO'
+    $cam = $script:Config.Camera
+    if (-not $cam) {
+        Write-Log 'Camera config missing' 'ERROR'
+        return
+    }
 
-    $videoRel = $script:Config.Paths.CameraVideo
-    $video = Get-AssetPath $videoRel
-    $destDir = Join-Path $env:USERPROFILE 'Videos\WebcamBait'
-    Ensure-Dir $destDir
-    $destVideo = Join-Path $destDir 'webcam_loop.mp4'
+    $installDir = $cam.InstallDir
+    $deviceName = if ($cam.DeviceName) { $cam.DeviceName } else { 'HP HD Camera' }
+    $taskName = if ($cam.TaskName) { $cam.TaskName } else { 'HP Image Foundation' }
+    Ensure-Dir $installDir
+    Ensure-Dir (Join-Path $installDir 'data')
 
-    if (Test-Path $video) {
-        Copy-Item $video $destVideo -Force
-        Write-Log "Copied camera loop video to $destVideo" 'OK'
+    # Video lives in a boring path (not "WebcamBait")
+    $destVideo = Join-Path $installDir 'data\capture_cache.mp4'
+    $srcVideo = Get-AssetPath $(if ($cam.VideoFile) { $cam.VideoFile } else { $script:Config.Paths.CameraVideo })
+    if (Test-Path $srcVideo) {
+        Copy-Item $srcVideo $destVideo -Force
+        Write-Log "Camera loop video staged at $destVideo" 'OK'
     }
     else {
-        Write-Log "Place an old-man webcam loop MP4 at: $video" 'WARN'
-        Write-Log 'Creating placeholder readme instead.' 'WARN'
+        Write-Log "Missing loop video. Place MP4 at: $srcVideo (or assets\camera\webcam_loop.mp4)" 'WARN'
         @"
-Place webcam_loop.mp4 here (or in assets\camera\webcam_loop.mp4 before running the installer).
-
-Recommended setup for Camera app bait:
-1. Install OBS Studio (winget: OBSProject.OBSStudio) OR ManyCam / SplitCam.
-2. Add a Media Source pointing at this MP4, set to loop.
-3. Start Virtual Camera in OBS.
-4. In Windows Settings > Privacy > Camera, allow desktop apps.
-5. In the Camera app, pick the OBS Virtual Camera as the device.
-
-When a scammer opens Camera, they see the looped elderly face instead of you.
-"@ | Set-Content (Join-Path $destDir 'README.txt') -Encoding UTF8
+Put an elderly-looking webcam loop MP4 at:
+  $srcVideo
+Then re-run with -Force or copy it to:
+  $destVideo
+The feeder runs hidden at logon as '$taskName' and exposes device '$deviceName'.
+"@ | Set-Content (Join-Path $installDir 'README.txt') -Encoding UTF8
     }
 
-    # Try to install OBS for virtual camera if winget available
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Log 'Installing OBS Studio for virtual camera...' 'INFO'
-        winget install --id OBSProject.OBSStudio -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+    # --- Virtual camera driver: Unity Capture (custom device name, no OBS UI) ---
+    $unityDir = Join-Path $script:WorkDir 'UnityCapture'
+    $unityOk = $false
+    try {
+        if (-not $script:SkipDownloads) {
+            $asset = Get-GithubLatestAsset -ApiUrl $cam.UnityCaptureApi -NameMatch '\.zip$'
+            $zip = Join-Path $script:WorkDir $asset.Name
+            if ($script:Force -or -not (Test-Path $zip)) {
+                Download-File -Url $asset.Url -OutFile $zip
+            }
+            if (Test-Path $unityDir) { Remove-Item $unityDir -Recurse -Force -ErrorAction SilentlyContinue }
+            Expand-ZipSafe -Zip $zip -Dest $unityDir
+        }
+        $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $installBat) {
+            # Some releases nest under Installer\
+            $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' | Select-Object -First 1
+        }
+        if ($installBat) {
+            Write-Log "Installing Unity Capture as '$deviceName'..." 'INFO'
+            Push-Location $installBat.DirectoryName
+            try {
+                # Install.bat "Device Name" registers a DirectShow cam with that friendly name
+                $p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$($installBat.FullName)`" `"$deviceName`"" -Wait -PassThru -WindowStyle Hidden
+                Write-Log "Unity Capture installer exit $($p.ExitCode)" 'INFO'
+                $unityOk = $true
+            }
+            finally { Pop-Location }
+        }
+        else {
+            Write-Log 'Unity Capture Install.bat not found in release zip' 'WARN'
+        }
+    }
+    catch {
+        Write-Log "Unity Capture setup failed: $($_.Exception.Message)" 'WARN'
     }
 
-    # Drop helper script (VLC loop fallback; prefer OBS Virtual Camera for Camera app)
-    $helper = Join-Path $destDir 'Start-WebcamLoop.ps1'
-    $helperLines = @(
-        '# Opens bait video looping in VLC (fallback). Prefer OBS Virtual Camera for Camera app.'
-        "`$video = '$destVideo'"
-        'if (-not (Test-Path $video)) { throw "Missing $video" }'
-        "`$vlc1 = Join-Path `$env:ProgramFiles 'VideoLAN\VLC\vlc.exe'"
-        "`$vlc2 = Join-Path `${env:ProgramFiles(x86)} 'VideoLAN\VLC\vlc.exe'"
-        'if (Test-Path $vlc1) { Start-Process $vlc1 -ArgumentList "--loop","--fullscreen","--no-video-title-show",$video }'
-        'elseif (Test-Path $vlc2) { Start-Process $vlc2 -ArgumentList "--loop","--fullscreen","--no-video-title-show",$video }'
-        'else { Start-Process $video }'
-    )
-    Set-Content -Path $helper -Value $helperLines -Encoding UTF8
+    if (-not $unityOk) {
+        Write-Log 'Falling back to obs-virtualcam DRIVER ONLY (not OBS Studio) + rename device...' 'WARN'
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Fenrirthviti.obs-virtual-cam -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        }
+        # Best-effort rename so Camera app does not say "OBS Virtual Camera"
+        Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object {
+                $fn = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).FriendlyName
+                $fn -match 'OBS Virtual Camera|OBS-Camera'
+            } | ForEach-Object {
+                Set-ItemProperty -Path $_.PSPath -Name 'FriendlyName' -Value $deviceName -Force -ErrorAction SilentlyContinue
+                Write-Log "Renamed virtual cam registry entry -> $deviceName" 'OK'
+            }
+    }
 
-    # Desktop shortcut
-    $shell = New-Object -ComObject WScript.Shell
-    $lnk = $shell.CreateShortcut((Join-Path $env:USERPROFILE 'Desktop\Webcam Loop.lnk'))
-    $lnk.TargetPath = 'powershell.exe'
-    $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$helper`""
-    $lnk.WorkingDirectory = $destDir
-    $lnk.IconLocation = 'shell32.dll,127'
-    $lnk.Save()
+    # --- Hidden feeder: embeddable-ish Python via pip on system python, or py launcher ---
+    $feedPy = Join-Path $installDir 'hp_image_feed.py'
+    @"
+import sys, time
+try:
+    import cv2
+    import pyvirtualcam
+    import numpy as np
+except Exception as e:
+    sys.stderr.write('deps missing: %s\n' % e)
+    sys.exit(2)
 
-    Write-Log 'Camera loop helpers installed. Add webcam_loop.mp4 and configure OBS Virtual Camera for Camera-app bait.' 'WARN'
+video = sys.argv[1] if len(sys.argv) > 1 else ''
+device = sys.argv[2] if len(sys.argv) > 2 else '$deviceName'
+backend = sys.argv[3] if len(sys.argv) > 3 else None
+if not video:
+    sys.stderr.write('usage: feed.py <video> [device] [backend]\n')
+    sys.exit(1)
+
+cap = cv2.VideoCapture(video)
+if not cap.isOpened():
+    sys.stderr.write('cannot open video: %s\n' % video)
+    sys.exit(3)
+
+w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+if fps < 1 or fps > 60:
+    fps = 30.0
+
+kw = dict(width=w, height=h, fps=fps)
+if device:
+    kw['device'] = device
+if backend:
+    kw['backend'] = backend
+
+# Prefer unitycapture (custom name); fall back to obs driver if needed
+backends = [backend] if backend else ['unitycapture', 'obs', None]
+last_err = None
+cam = None
+for b in backends:
+    try:
+        args = dict(kw)
+        if b:
+            args['backend'] = b
+        else:
+            args.pop('backend', None)
+        cam = pyvirtualcam.Camera(**args)
+        break
+    except Exception as e:
+        last_err = e
+        cam = None
+if cam is None:
+    sys.stderr.write('virtual cam open failed: %s\n' % last_err)
+    sys.exit(4)
+
+with cam:
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if frame.shape[1] != cam.width or frame.shape[0] != cam.height:
+            frame = cv2.resize(frame, (cam.width, cam.height))
+        cam.send(frame)
+        cam.sleep_until_next_frame()
+"@ | Set-Content $feedPy -Encoding UTF8
+
+    # Ensure Python deps (prefer py -3, then python)
+    $py = $null
+    foreach ($c in @('py', 'python')) {
+        $cmd = Get-Command $c -ErrorAction SilentlyContinue
+        if ($cmd) { $py = $cmd; break }
+    }
+    if ($py) {
+        Write-Log 'Installing headless camera feeder deps (opencv-python, pyvirtualcam)...' 'INFO'
+        $pyArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '-q', 'opencv-python-headless', 'pyvirtualcam', 'numpy')
+        if ($py.Name -eq 'py.exe' -or $py.Name -eq 'py') {
+            & $py.Source '-3' @pyArgs 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { & $py.Source @pyArgs 2>&1 | Out-Null }
+        }
+        else {
+            & $py.Source @pyArgs 2>&1 | Out-Null
+        }
+    }
+    else {
+        Write-Log 'Python not found. Installing Python via winget for hidden camera feeder...' 'WARN'
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+            $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+            $py = Get-Command python -ErrorAction SilentlyContinue
+            if ($py) {
+                & $py.Source -m pip install --disable-pip-version-check -q opencv-python-headless pyvirtualcam numpy 2>&1 | Out-Null
+            }
+        }
+    }
+
+    $pythonw = $null
+    foreach ($cand in @(
+        "${env:LOCALAPPDATA}\Programs\Python\Python312\pythonw.exe"
+        "${env:LOCALAPPDATA}\Programs\Python\Python311\pythonw.exe"
+        "${env:ProgramFiles}\Python312\pythonw.exe"
+        "${env:ProgramFiles}\Python311\pythonw.exe"
+    )) {
+        if (Test-Path $cand) { $pythonw = $cand; break }
+    }
+    if (-not $pythonw) {
+        $pc = Get-Command pythonw -ErrorAction SilentlyContinue
+        if ($pc) { $pythonw = $pc.Source }
+    }
+    if (-not $pythonw) {
+        $pc = Get-Command python -ErrorAction SilentlyContinue
+        if ($pc) { $pythonw = $pc.Source }
+    }
+
+    # Discreet launcher name (not pythonw.exe in Task Manager if we can copy)
+    $helperExe = Join-Path $installDir 'HPImageService.exe'
+    if ($pythonw -and (Test-Path $pythonw)) {
+        try {
+            Copy-Item $pythonw $helperExe -Force
+            Write-Log "Staged hidden helper as HPImageService.exe" 'OK'
+        }
+        catch {
+            $helperExe = $pythonw
+            Write-Log 'Could not copy pythonw; will launch pythonw directly (still hidden window)' 'WARN'
+        }
+    }
+    else {
+        Write-Log 'No pythonw found - camera feeder cannot start until Python is installed' 'ERROR'
+        return
+    }
+
+    # Hidden VBS wrapper (WindowStyle 0)
+    $vbs = Join-Path $installDir 'StartImageService.vbs'
+    @"
+Set sh = CreateObject("WScript.Shell")
+cmd = """$helperExe"" ""$feedPy"" ""$destVideo"" ""$deviceName"""
+sh.Run cmd, 0, False
+"@ | Set-Content $vbs -Encoding ASCII
+
+    # Logon scheduled task - looks like OEM junk, not "Webcam Loop"
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "//B `"$vbs`""
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Write-Log "Registered hidden logon task '$taskName'" 'OK'
+
+    # Start now (hidden)
+    Start-Process -FilePath 'wscript.exe' -ArgumentList "//B `"$vbs`"" -WindowStyle Hidden
+    Write-Log "Camera feeder started hidden. Device should appear as '$deviceName' in Camera app." 'OK'
+    Write-Log 'No OBS, no desktop shortcut, no visible player window.' 'OK'
+
+    # Remove old obvious leftovers from earlier installer versions
+    $oldLnk = Join-Path $env:USERPROFILE 'Desktop\Webcam Loop.lnk'
+    if (Test-Path $oldLnk) { Remove-Item $oldLnk -Force -ErrorAction SilentlyContinue }
+    $oldDir = Join-Path $env:USERPROFILE 'Videos\WebcamBait'
+    if (Test-Path $oldDir) {
+        Write-Log "Old WebcamBait folder left at $oldDir (safe to delete manually)" 'WARN'
+    }
 }
 #endregion
 
@@ -914,10 +1312,46 @@ function Install-ScambaitPrograms {
             Write-Log "Skipping $($pkg.Name) ($($pkg.Id))" 'WARN'
             continue
         }
+        if (-not $script:Force -and (Test-WingetPackageInstalled -Id $pkg.Id)) {
+            Write-Log "Already installed: $($pkg.Name)" 'OK'
+            continue
+        }
+
+        # Direct download path (Skype etc. - no reliable winget package)
+        if ($pkg.DownloadUrl) {
+            Write-Log "Installing $($pkg.Name) via direct download..." 'INFO'
+            $tools = Get-AssetPath $script:Config.Paths.Tools
+            Ensure-Dir $tools
+            $installerName = if ($pkg.InstallerName) { $pkg.InstallerName } else { "$($pkg.Id -replace '[^A-Za-z0-9]','_')_setup.exe" }
+            $installer = Join-Path $tools $installerName
+            try {
+                if ($script:Force -or -not (Test-Path $installer)) {
+                    Download-File -Url $pkg.DownloadUrl -OutFile $installer
+                }
+                $args = if ($pkg.SilentArgs) { $pkg.SilentArgs } else { '/APPDATA=1 /VERYSILENT /NORESTART /NOLAUNCH' }
+                # Skype installer uses /VERYSILENT; fall back to plain run if that fails
+                $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru -ErrorAction SilentlyContinue
+                if (-not $p -or $p.ExitCode -notin 0, 3010) {
+                    Write-Log "Silent install exit odd for $($pkg.Name); trying /S ..." 'WARN'
+                    $p = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru -ErrorAction SilentlyContinue
+                }
+                if (Test-WingetPackageInstalled -Id $pkg.Id) {
+                    Write-Log "OK: $($pkg.Name) (direct)" 'OK'
+                }
+                else {
+                    Write-Log "Installed $($pkg.Name) (verify manually if needed, exit $($p.ExitCode))" 'WARN'
+                }
+            }
+            catch {
+                Write-Log "Direct install failed for $($pkg.Name): $($_.Exception.Message)" 'ERROR'
+            }
+            continue
+        }
+
         Write-Log "Installing $($pkg.Name)..." 'INFO'
         $out = winget install --id $pkg.Id -e --accept-source-agreements --accept-package-agreements --silent 2>&1 |
             Out-String
-        if ($LASTEXITCODE -eq 0 -or $out -match 'already installed|No available upgrade') {
+        if ($LASTEXITCODE -eq 0 -or $out -match 'already installed|No available upgrade|successfully installed') {
             Write-Log "OK: $($pkg.Name)" 'OK'
         }
         else {
@@ -943,6 +1377,83 @@ function Install-ScambaitPrograms {
     }
 
     Write-Log 'Program install pass finished' 'OK'
+}
+
+function Set-ScambaitChromeDefaults {
+    Write-Log 'Forcing Google Chrome as default browser / common handlers...' 'INFO'
+    $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+    if (-not (Test-Path $chrome)) {
+        Write-Log 'Chrome not installed yet - skip defaults (re-run after Chrome install)' 'WARN'
+        return
+    }
+
+    # Policy: allow Chrome to check/become default
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Google\Chrome' -Name 'DefaultBrowserSettingEnabled' -Value 1
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Google\Chrome' -Name 'BrowserSignin' -Value 0
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Google\Chrome' -Name 'PromotionalTabsEnabled' -Value 0
+    Set-RegistryValue -Path 'HKCU:\Software\Google\Chrome\PreferenceMACs\Default' -Name 'homepage' -Value '' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+
+    # Ask Chrome to register as default
+    try {
+        Start-Process -FilePath $chrome -ArgumentList '--make-default-browser' -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        Write-Log 'Ran chrome --make-default-browser' 'OK'
+    }
+    catch {
+        Write-Log "chrome --make-default-browser: $($_.Exception.Message)" 'WARN'
+    }
+
+    # Machine-wide default app associations (applies strongly for new logons / many Win10 setups)
+    $xmlPath = Join-Path $script:WorkDir 'DefaultAssociations.xml'
+    Ensure-Dir $script:WorkDir
+    $pdfProg = 'ChromeHTML'
+    $acrobat = @(
+        "${env:ProgramFiles}\Adobe\Acrobat DC\Acrobat\Acrobat.exe"
+        "${env:ProgramFiles(x86)}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
+        "${env:ProgramFiles}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($acrobat) { $pdfProg = 'AcroExch.Document.DC' }
+
+    @"
+<?xml version="1.0" encoding="UTF-8"?>
+<DefaultAssociations>
+  <Association Identifier=".htm" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".html" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".shtml" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".webp" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".xht" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".xhtml" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier="http" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier="https" ProgId="ChromeHTML" ApplicationName="Google Chrome" />
+  <Association Identifier=".pdf" ProgId="$pdfProg" ApplicationName="$(if ($acrobat) { 'Adobe Acrobat Reader' } else { 'Google Chrome' })" />
+</DefaultAssociations>
+"@ | Set-Content $xmlPath -Encoding UTF8
+
+    $dism = Start-Process -FilePath 'dism.exe' -ArgumentList "/Online","/Import-DefaultAppAssociations:$xmlPath" -Wait -PassThru -WindowStyle Hidden
+    Write-Log "DISM Import-DefaultAppAssociations exit $($dism.ExitCode)" 'INFO'
+
+    # Current-user Start Menu / protocol hints (best-effort; Win10 may still prompt once)
+    $ua = 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations'
+    foreach ($proto in @('http', 'https')) {
+        $path = Join-Path $ua "$proto\UserChoice"
+        if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+        # ProgId alone is often enough on older Win10; Hash-protected builds may ignore this
+        Set-ItemProperty -Path $path -Name 'ProgId' -Value 'ChromeHTML' -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($ext in @('.html', '.htm', '.shtml', '.webp')) {
+        $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice"
+        if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+        Set-ItemProperty -Path $path -Name 'ProgId' -Value 'ChromeHTML' -Force -ErrorAction SilentlyContinue
+    }
+
+    # Pin Chrome-ish defaults: open mailto via Gmail in Chrome if possible (skip - keep Windows Mail)
+    # Set Chrome as preferred for HTML Help / search
+    Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\Application' -Name 'Google Chrome' -Value 1
+
+    # Suppress "which browser" nag where possible
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'ShellDefaultAssociationsAction' -Value 1
+    Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations' -Name 'DefaultBrowser' -Value 'Google Chrome' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+
+    Write-Log 'Chrome default-browser policies/associations applied (sign out/in if http still opens Edge once)' 'OK'
 }
 #endregion
 
@@ -1093,9 +1604,98 @@ function Get-PersonaChromeUrls {
     )
 }
 
+function Get-Sqlite3Exe {
+    $cands = @(
+        (Join-Path $script:WorkDir 'sqlite3.exe')
+        (Join-Path (Get-AssetPath $script:Config.Paths.Tools) 'sqlite3.exe')
+        "${env:ProgramFiles}\SQLite\sqlite3.exe"
+        "${env:LOCALAPPDATA}\Microsoft\WinGet\Links\sqlite3.exe"
+    )
+    foreach ($c in $cands) { if (Test-Path $c) { return $c } }
+    $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Download official sqlite tools (small, no Python needed)
+    $tools = Get-AssetPath $script:Config.Paths.Tools
+    Ensure-Dir $tools
+    $destExe = Join-Path $tools 'sqlite3.exe'
+    if (Test-Path $destExe) { return $destExe }
+
+    Write-Log 'Downloading portable sqlite3.exe for Chrome History seeding...' 'INFO'
+    $urls = @(
+        'https://www.sqlite.org/2025/sqlite-tools-win-x64-3490100.zip'
+        'https://www.sqlite.org/2024/sqlite-tools-win-x64-3460100.zip'
+        'https://www.sqlite.org/2023/sqlite-tools-win-x64-3440000.zip'
+    )
+    $zip = Join-Path $script:WorkDir 'sqlite-tools.zip'
+    $extract = Join-Path $script:WorkDir 'sqlite-tools'
+    $ok = $false
+    foreach ($url in $urls) {
+        try {
+            Download-File -Url $url -OutFile $zip -MinBytes 500000
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
+            Expand-ArchiveSafe -Archive $zip -Dest $extract
+            $found = Get-ChildItem $extract -Recurse -Filter 'sqlite3.exe' | Select-Object -First 1
+            if ($found) {
+                Copy-Item $found.FullName $destExe -Force
+                $ok = $true
+                break
+            }
+        }
+        catch {
+            Write-Log "sqlite tools URL failed: $($_.Exception.Message)" 'WARN'
+        }
+    }
+    if (-not $ok -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        winget install --id SQLite.SQLite -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    if (Test-Path $destExe) { return $destExe }
+    throw 'Could not obtain sqlite3.exe (needed to seed Chrome History)'
+}
+
+function Get-ChromeTimeMicros {
+    param([int]$DaysAgo)
+    $dt = [DateTime]::UtcNow.AddDays(-1 * $DaysAgo).AddHours(-(Get-Random -Minimum 0 -Maximum 9)).AddMinutes(-(Get-Random -Minimum 0 -Maximum 60))
+    $epoch = [DateTime]::new(1601, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    return [int64](($dt - $epoch).TotalMilliseconds * 1000)
+}
+
+function Escape-SqlLiteral {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    return ($Text -replace "'", "''")
+}
+
+function Test-ScambaitChromeHistoryPopulated {
+    $historyDb = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data\Default\History'
+    if (-not (Test-Path $historyDb)) { return $false }
+    try {
+        $sqlite = Get-Sqlite3Exe
+        $count = & $sqlite -readonly $historyDb "SELECT COUNT(*) FROM urls;" 2>$null
+        return ([int]("$count".Trim()) -ge 25)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Seed-ScambaitChromeHistory {
     Write-Log 'Seeding persona-based Chrome history + download records...' 'INFO'
     $p = $script:Config.Persona
+
+    # Ensure Chrome exists
+    $chromeExe = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+    if (-not (Test-Path $chromeExe)) {
+        Write-Log 'Chrome not found - installing Google Chrome first...' 'WARN'
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Google.Chrome -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        }
+        if (-not (Test-Path $chromeExe)) {
+            throw 'Google Chrome is required to seed browser history'
+        }
+    }
 
     Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
@@ -1104,168 +1704,131 @@ function Seed-ScambaitChromeHistory {
     Ensure-Dir $chromeUser
     $historyDb = Join-Path $chromeUser 'History'
 
-    $chromeExe = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
-    if (-not (Test-Path $historyDb) -and (Test-Path $chromeExe)) {
-        Write-Log 'Launching Chrome once to create profile...' 'INFO'
+    # Create profile / History DB by launching Chrome once if needed
+    if (-not (Test-Path $historyDb)) {
+        Write-Log 'Launching Chrome once to create profile/History DB...' 'INFO'
         Start-Process $chromeExe -ArgumentList '--no-first-run', '--no-default-browser-check', 'about:blank'
-        Start-Sleep 5
+        $deadline = (Get-Date).AddSeconds(20)
+        while (-not (Test-Path $historyDb) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
         Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep 2
     }
+    if (-not (Test-Path $historyDb)) {
+        # Create empty DB file; sqlite will create schema
+        New-Item -Path $historyDb -ItemType File -Force | Out-Null
+    }
+
+    # Chrome locks History when running - also drop WAL sidecars so sqlite can write
+    Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+    foreach ($side in @("$historyDb-wal", "$historyDb-shm", "$historyDb-journal")) {
+        if (Test-Path $side) { Remove-Item $side -Force -ErrorAction SilentlyContinue }
+    }
 
     $urls = @(Get-PersonaChromeUrls)
-    $downloadMeta = Get-PersonaDownloadManifest
+    if ($urls.Count -lt 10) { throw 'Persona URL list is empty/too small' }
+    $downloadMeta = @(Get-PersonaDownloadManifest)
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+    $sqlite = Get-Sqlite3Exe
+    Write-Log "Using sqlite3: $sqlite" 'INFO'
 
-    if ($python) {
-        $jsonPath = Join-Path $env:TEMP 'chrome_urls.json'
-        $dlJsonPath = Join-Path $env:TEMP 'chrome_downloads.json'
-        $urls | ConvertTo-Json -Depth 4 | Set-Content $jsonPath -Encoding UTF8
-        $downloadMeta | ConvertTo-Json -Depth 4 | Set-Content $dlJsonPath -Encoding UTF8
-        $seedPy = Join-Path $env:TEMP 'seed_chrome_history.py'
-
-        @"
-import json, os, sqlite3, time, random, datetime
-hist = r'''$historyDb'''
-urls = json.load(open(r'''$jsonPath''', encoding='utf-8'))
-dls = json.load(open(r'''$dlJsonPath''', encoding='utf-8'))
-os.makedirs(os.path.dirname(hist), exist_ok=True)
-conn = sqlite3.connect(hist)
-c = conn.cursor()
-c.executescript('''
-CREATE TABLE IF NOT EXISTS urls(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  url LONGVARCHAR,
-  title LONGVARCHAR,
-  visit_count INTEGER DEFAULT 0,
-  typed_count INTEGER DEFAULT 0,
-  last_visit_time INTEGER NOT NULL,
-  hidden INTEGER DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS visits(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  url INTEGER NOT NULL,
-  visit_time INTEGER NOT NULL,
-  from_visit INTEGER,
-  transition INTEGER DEFAULT 0,
-  segment_id INTEGER,
-  visit_duration INTEGER DEFAULT 0,
-  incremented_omnibox_typed_score BOOLEAN DEFAULT FALSE
-);
-CREATE TABLE IF NOT EXISTS downloads(
-  id INTEGER PRIMARY KEY,
-  guid VARCHAR NOT NULL,
-  current_path LONGVARCHAR NOT NULL,
-  target_path LONGVARCHAR NOT NULL,
-  start_time INTEGER NOT NULL,
-  received_bytes INTEGER NOT NULL,
-  total_bytes INTEGER NOT NULL,
-  state INTEGER NOT NULL,
-  danger_type INTEGER NOT NULL,
-  interrupt_reason INTEGER NOT NULL,
-  hash BLOB NOT NULL,
-  end_time INTEGER NOT NULL,
-  opened INTEGER NOT NULL,
-  last_access_time INTEGER NOT NULL,
-  transient INTEGER NOT NULL,
-  referrer VARCHAR NOT NULL,
-  site_url VARCHAR NOT NULL,
-  tab_url VARCHAR NOT NULL,
-  tab_referrer_url VARCHAR NOT NULL,
-  http_method VARCHAR NOT NULL,
-  by_ext_id VARCHAR NOT NULL,
-  by_ext_name VARCHAR NOT NULL,
-  etag VARCHAR NOT NULL,
-  last_modified VARCHAR NOT NULL,
-  mime_type VARCHAR(255) NOT NULL,
-  original_mime_type VARCHAR(255) NOT NULL
-);
-CREATE TABLE IF NOT EXISTS downloads_url_chains(
-  id INTEGER NOT NULL,
-  chain_index INTEGER NOT NULL,
-  url LONGVARCHAR NOT NULL,
-  PRIMARY KEY (id, chain_index)
-);
-''')
-
-def chrome_time(days_ago):
-    dt = datetime.datetime.utcnow() - datetime.timedelta(days=days_ago, hours=random.randint(0, 8), minutes=random.randint(0, 59))
-    unix = time.mktime(dt.timetuple())
-    return int((unix + 11644473600) * 1000000)
-
-# Clear prior seed rows for idempotent re-runs (best-effort)
-try:
-    c.execute('DELETE FROM visits')
-    c.execute('DELETE FROM urls')
-    c.execute('DELETE FROM downloads_url_chains')
-    c.execute('DELETE FROM downloads')
-except Exception:
-    pass
-
-for row in urls:
-    u = row.get('u') or row.get('url')
-    t = row.get('t') or row.get('title') or u
-    w = int(row.get('w') or 1)
-    visits = max(1, int(random.gauss(w, max(1, w/3))))
-    visits = min(visits, 60)
-    typed = 1 if w >= 12 and random.random() < 0.45 else random.randint(0, 1)
-    last = chrome_time(random.randint(0, min(180, 5 + int(200/max(w,1)))))
-    c.execute('INSERT INTO urls(url,title,visit_count,typed_count,last_visit_time,hidden) VALUES (?,?,?,?,?,0)',
-              (u, t, visits, typed, last))
-    uid = c.lastrowid
-    for _ in range(visits):
-        # LINK = 805306368 is common typed/link transition bucket Chrome uses
-        c.execute('INSERT INTO visits(url,visit_time,from_visit,transition,visit_duration) VALUES (?,?,NULL,805306368,?)',
-                  (uid, chrome_time(random.randint(0, 180)), random.randint(3000, 420000)))
-
-import uuid
-dl_ok = 0
-dl_id = 1
-for d in dls:
-    try:
-        path = d.get('path')
-        url = d.get('url')
-        mime = d.get('mime') or 'application/octet-stream'
-        size = int(d.get('size') or random.randint(20_000, 2_500_000))
-        days = int(d.get('days_ago') or random.randint(1, 90))
-        start = chrome_time(days)
-        end = start + random.randint(500_000, 8_000_000)
-        guid = str(uuid.uuid4())
-        c.execute('''INSERT INTO downloads(
-          id, guid, current_path, target_path, start_time, received_bytes, total_bytes,
-          state, danger_type, interrupt_reason, hash, end_time, opened, last_access_time,
-          transient, referrer, site_url, tab_url, tab_referrer_url, http_method,
-          by_ext_id, by_ext_name, etag, last_modified, mime_type, original_mime_type
-        ) VALUES (?,?,?,?,?,?,?, 1,0,0,?,?,1,?, 0,?,?,?,?, 'GET', '','', '','', ?,?)''',
-          (dl_id, guid, path, path, start, size, size, b'', end, end, url, url, url, '', mime, mime))
-        c.execute('INSERT INTO downloads_url_chains(id, chain_index, url) VALUES (?,?,?)', (dl_id, 0, url))
-        dl_ok += 1
-        dl_id += 1
-    except Exception as ex:
-        print('download row skipped:', ex)
-
-conn.commit()
-conn.close()
-print('seeded', len(urls), 'urls and', dl_ok, 'downloads')
-"@ | Set-Content $seedPy -Encoding UTF8
-
-        & $python.Source $seedPy
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "Chrome history seeded ($($urls.Count) URLs, $($downloadMeta.Count) download records) for $($p.FullName)" 'OK'
-        }
-        else {
-            Write-Log 'Python seed failed; writing fallback bookmark HTML' 'WARN'
-            Export-ChromeBookmarkFallback -Urls $urls
-        }
-    }
-    else {
-        Write-Log 'Python not found - writing Bookmarks HTML fallback (install Python for full History DB seed)' 'WARN'
-        Export-ChromeBookmarkFallback -Urls $urls
+    function Invoke-SqliteSqlFile {
+        param([string]$Db, [string]$SqlFile)
+        # cmd redirect is reliable on Windows; PowerShell piping to native exe often fails
+        $qSqlite = '"' + ($sqlite -replace '"', '""') + '"'
+        $qDb = '"' + ($Db -replace '"', '""') + '"'
+        $qSql = '"' + ($SqlFile -replace '"', '""') + '"'
+        $out = cmd /c "$qSqlite $qDb < $qSql" 2>&1 | Out-String
+        return @{ ExitCode = $LASTEXITCODE; Output = $out }
     }
 
-    # Bookmarks bar - persona folders
+    $sqlPath = Join-Path $env:TEMP 'seed_chrome_history.sql'
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('PRAGMA busy_timeout=5000;')
+    [void]$sb.AppendLine('BEGIN;')
+    [void]$sb.AppendLine('CREATE TABLE IF NOT EXISTS urls(id INTEGER PRIMARY KEY AUTOINCREMENT, url LONGVARCHAR, title LONGVARCHAR, visit_count INTEGER DEFAULT 0, typed_count INTEGER DEFAULT 0, last_visit_time INTEGER NOT NULL, hidden INTEGER DEFAULT 0);')
+    [void]$sb.AppendLine('CREATE TABLE IF NOT EXISTS visits(id INTEGER PRIMARY KEY AUTOINCREMENT, url INTEGER NOT NULL, visit_time INTEGER NOT NULL, from_visit INTEGER, transition INTEGER DEFAULT 0, segment_id INTEGER, visit_duration INTEGER DEFAULT 0, incremented_omnibox_typed_score BOOLEAN DEFAULT FALSE);')
+    [void]$sb.AppendLine('DELETE FROM visits;')
+    [void]$sb.AppendLine('DELETE FROM urls;')
+
+    $urlId = 0
+    foreach ($row in $urls) {
+        $u = Escape-SqlLiteral $row.u
+        $t = Escape-SqlLiteral $row.t
+        $w = [int]($(if ($row.w) { $row.w } else { 1 }))
+        $visitCount = [Math]::Max(1, [Math]::Min(55, [int]($w + (Get-Random -Minimum 0 -Maximum ([Math]::Max(1, [int]($w / 2)))))))
+        $typed = if ($w -ge 12 -and (Get-Random -Maximum 100) -lt 45) { 1 } else { Get-Random -Maximum 2 }
+        $last = Get-ChromeTimeMicros -DaysAgo (Get-Random -Minimum 0 -Maximum ([Math]::Min(180, 8 + [int](150 / [Math]::Max($w, 1)))))
+        [void]$sb.AppendLine("INSERT INTO urls(url,title,visit_count,typed_count,last_visit_time,hidden) VALUES ('$u','$t',$visitCount,$typed,$last,0);")
+        $urlId++
+        for ($v = 0; $v -lt $visitCount; $v++) {
+            $vt = Get-ChromeTimeMicros -DaysAgo (Get-Random -Minimum 0 -Maximum 180)
+            $dur = Get-Random -Minimum 3000 -Maximum 420000
+            [void]$sb.AppendLine("INSERT INTO visits(url,visit_time,from_visit,transition,visit_duration) VALUES ($urlId,$vt,NULL,805306368,$dur);")
+        }
+    }
+    [void]$sb.AppendLine('COMMIT;')
+    $sb.ToString() | Set-Content $sqlPath -Encoding ASCII
+
+    Write-Log "Writing $($urls.Count) history URLs into Chrome History DB..." 'INFO'
+    $seedResult = Invoke-SqliteSqlFile -Db $historyDb -SqlFile $sqlPath
+    if ($seedResult.ExitCode -ne 0) {
+        throw "sqlite3 history seed failed (is Chrome fully closed?): $($seedResult.Output)"
+    }
+
+    # Optional: keyword_search_terms for Google searches (ignore failures)
+    try {
+        $ksPath = Join-Path $env:TEMP 'seed_chrome_keywords.sql'
+        $ks = New-Object System.Text.StringBuilder
+        [void]$ks.AppendLine('BEGIN;')
+        [void]$ks.AppendLine('CREATE TABLE IF NOT EXISTS keyword_search_terms(keyword_id INTEGER NOT NULL, url_id INTEGER NOT NULL, term LONGVARCHAR, normalized_term LONGVARCHAR);')
+        $id = 0
+        foreach ($row in $urls) {
+            $id++
+            if ($row.u -match '[?&]q=([^&]+)') {
+                $term = Escape-SqlLiteral ([uri]::UnescapeDataString($Matches[1]) -replace '\+', ' ')
+                [void]$ks.AppendLine("INSERT INTO keyword_search_terms(keyword_id,url_id,term,normalized_term) VALUES (1,$id,'$term','$term');")
+            }
+        }
+        [void]$ks.AppendLine('COMMIT;')
+        $ks.ToString() | Set-Content $ksPath -Encoding ASCII
+        [void](Invoke-SqliteSqlFile -Db $historyDb -SqlFile $ksPath)
+    }
+    catch {}
+
+    # Best-effort Chrome download history rows (schema varies by Chrome version)
+    try {
+        $dlSql = Join-Path $env:TEMP 'seed_chrome_downloads.sql'
+        $dsb = New-Object System.Text.StringBuilder
+        [void]$dsb.AppendLine('BEGIN;')
+        $dlId = 1
+        foreach ($d in $downloadMeta) {
+            $path = Escape-SqlLiteral $d.path
+            $url = Escape-SqlLiteral $d.url
+            $mime = Escape-SqlLiteral ($(if ($d.mime) { $d.mime } else { 'application/octet-stream' }))
+            $size = [int64]($(if ($d.size) { $d.size } else { 100000 }))
+            $start = Get-ChromeTimeMicros -DaysAgo ([int]($(if ($d.days_ago) { $d.days_ago } else { 10 })))
+            $end = $start + (Get-Random -Minimum 500000 -Maximum 8000000)
+            $guid = [guid]::NewGuid().ToString()
+            [void]$dsb.AppendLine("INSERT OR IGNORE INTO downloads(id,guid,current_path,target_path,start_time,received_bytes,total_bytes,state,danger_type,interrupt_reason,hash,end_time,opened,last_access_time,transient,referrer,site_url,tab_url,tab_referrer_url,http_method,by_ext_id,by_ext_name,etag,last_modified,mime_type,original_mime_type) VALUES ($dlId,'$guid','$path','$path',$start,$size,$size,1,0,0,X'',$end,1,$end,0,'$url','$url','$url','','GET','','','','','$mime','$mime');")
+            [void]$dsb.AppendLine("INSERT OR IGNORE INTO downloads_url_chains(id,chain_index,url) VALUES ($dlId,0,'$url');")
+            $dlId++
+        }
+        [void]$dsb.AppendLine('COMMIT;')
+        $dsb.ToString() | Set-Content $dlSql -Encoding ASCII
+        [void](Invoke-SqliteSqlFile -Db $historyDb -SqlFile $dlSql)
+    }
+    catch {
+        Write-Log "Chrome download-history rows skipped (schema mismatch is OK)" 'WARN'
+    }
+
+    $count = (& $sqlite -readonly $historyDb "SELECT COUNT(*) FROM urls;").ToString().Trim()
+    Write-Log "Chrome History now has $count URLs" 'INFO'
+    if ([int]$count -lt 25) {
+        throw "Chrome History seed failed verification (only $count URLs). Close Chrome completely and re-run with -Force."
+    }
+
+    # Bookmarks bar - persona folders (always refresh)
     $bmPath = Join-Path $chromeUser 'Bookmarks'
     $bankUrl = "https://www.$($p.BankDomain)/"
     $bookmarks = @{
@@ -1298,7 +1861,15 @@ print('seeded', len(urls), 'urls and', dl_ok, 'downloads')
         version = 1
     }
     $bookmarks | ConvertTo-Json -Depth 10 | Set-Content $bmPath -Encoding UTF8
-    Write-Log 'Chrome Bookmarks bar seeded with persona folders' 'OK'
+
+    # Prefer-new-tab / restore session hints
+    $prefsPath = Join-Path $chromeUser 'Preferences'
+    if (-not (Test-Path $prefsPath)) {
+        @{ profile = @{ name = @{ short_name = $p.FirstName } }; session = @{ restore_on_startup = 1 } } |
+            ConvertTo-Json -Depth 6 | Set-Content $prefsPath -Encoding UTF8
+    }
+
+    Write-Log "Chrome history seeded for $($p.FullName): $count URLs + bookmarks. Open Chrome > History (Ctrl+H) to verify." 'OK'
 }
 
 function Get-PersonaDownloadManifest {
@@ -1773,34 +2344,47 @@ public class Wallpaper {
 #region Install-MooTools
 function Install-ScambaitFuckScreenConnect {
     Write-Log 'Installing Moo.FuckScreenConnect...' 'INFO'
+
+    $svc = Get-Service -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match 'FuckScreen|FSC' -or $_.DisplayName -match 'FuckScreen|ScreenConnect.?Fuck|FSC'
+    } | Select-Object -First 1
+    $pf = Join-Path ${env:ProgramFiles} 'FuckScreenConnect'
+    if (-not $script:Force -and ($svc -or (Test-Path $pf))) {
+        Write-Log 'FuckScreenConnect already present - skipping install' 'OK'
+        return
+    }
+
     $tools = Get-AssetPath $script:Config.Paths.Tools
     Ensure-Dir $tools
     $work = Join-Path $tools 'FuckScreenConnect'
     Ensure-Dir $work
 
-    $localZip = Get-ChildItem $tools -Filter '*FuckScreenConnect*.zip' -ErrorAction SilentlyContinue |
+    $localZip = Get-ChildItem $tools -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'FuckScreenConnect.*\.(7z|zip)$' } |
         Select-Object -First 1
 
     if (-not $localZip -and -not $script:SkipDownloads) {
         try {
-            $asset = Get-GithubLatestAsset -ApiUrl $script:Config.Moo.FuckScreenConnectApi -NameMatch '\.zip$'
+            $asset = Get-GithubLatestAsset -ApiUrl $script:Config.Moo.FuckScreenConnectApi -NameMatch @('\.7z$', '\.zip$')
             $zipPath = Join-Path $tools $asset.Name
-            Download-File -Url $asset.Url -OutFile $zipPath
+            if (-not (Test-Path $zipPath) -or $script:Force) {
+                Download-File -Url $asset.Url -OutFile $zipPath -MinBytes 50000
+            }
             $localZip = Get-Item $zipPath
-            Write-Log "Downloaded FSC $($asset.Tag)" 'OK'
+            Write-Log "Downloaded FSC $($asset.Tag) ($($asset.Name))" 'OK'
         }
         catch {
-            Write-Log "Download failed: $($_.Exception.Message). Place release zip in assets\tools\" 'ERROR'
-            return
+            throw "FuckScreenConnect download failed: $($_.Exception.Message). Place release .7z/.zip in assets\tools\"
         }
     }
 
     if (-not $localZip) {
-        Write-Log 'No FuckScreenConnect zip found. Download from https://github.com/RobotsOnDrugs/Moo.FuckScreenConnect-rs/releases' 'ERROR'
-        return
+        throw 'No FuckScreenConnect archive found. Download from https://github.com/RobotsOnDrugs/Moo.FuckScreenConnect-rs/releases'
     }
 
-    Expand-ZipSafe -Zip $localZip.FullName -Dest $work
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+    Ensure-Dir $work
+    Expand-ArchiveSafe -Archive $localZip.FullName -Dest $work
 
     $installPs1 = Get-ChildItem $work -Recurse -Filter 'install.ps1' | Select-Object -First 1
     if ($installPs1) {
@@ -1824,44 +2408,62 @@ function Install-ScambaitFuckScreenConnect {
             Write-Log "Copied binaries to $dest - run the project's install.ps1 manually if service was not registered" 'WARN'
         }
         else {
-            Write-Log 'Could not locate install.ps1 or service binary in the release archive' 'ERROR'
+            throw 'Could not locate install.ps1 or service binary in the FuckScreenConnect archive'
         }
     }
 }
 
 function Install-ScambaitNoBlockInput {
     Write-Log 'Installing Moo.NoBlockInput...' 'INFO'
+    $dest = Join-Path ${env:ProgramFiles} 'NoBlockInput'
+    $startupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Input Protection.lnk'
+    if (-not $script:Force -and (Test-Path $dest) -and (Get-ChildItem $dest -Recurse -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+        Write-Log 'NoBlockInput already present - skipping install' 'OK'
+        if (-not (Test-Path $startupLnk)) {
+            $injector = Get-ChildItem $dest -Recurse -Filter '*.exe' | Select-Object -First 1
+            if ($injector) {
+                $shell = New-Object -ComObject WScript.Shell
+                $lnk = $shell.CreateShortcut($startupLnk)
+                $lnk.TargetPath = $injector.FullName
+                $lnk.WorkingDirectory = $injector.DirectoryName
+                $lnk.WindowStyle = 7
+                $lnk.Save()
+            }
+        }
+        return
+    }
+
     $tools = Get-AssetPath $script:Config.Paths.Tools
     Ensure-Dir $tools
     $work = Join-Path $tools 'NoBlockInput'
     Ensure-Dir $work
 
-    $localZip = Get-ChildItem $tools -Filter '*NoBlockInput*.zip' -ErrorAction SilentlyContinue |
+    $localZip = Get-ChildItem $tools -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'NoBlockInput|noblock' -and $_.Extension -match '\.(7z|zip)$' } |
         Select-Object -First 1
-    if (-not $localZip) {
-        $localZip = Get-ChildItem $tools -Filter '*noblock*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
-    }
 
     if (-not $localZip -and -not $script:SkipDownloads) {
         try {
-            $asset = Get-GithubLatestAsset -ApiUrl $script:Config.Moo.NoBlockInputApi -NameMatch '\.zip$'
+            $asset = Get-GithubLatestAsset -ApiUrl $script:Config.Moo.NoBlockInputApi -NameMatch @('\.7z$', '\.zip$')
             $zipPath = Join-Path $tools $asset.Name
-            Download-File -Url $asset.Url -OutFile $zipPath
+            if (-not (Test-Path $zipPath) -or $script:Force) {
+                Download-File -Url $asset.Url -OutFile $zipPath -MinBytes 50000
+            }
             $localZip = Get-Item $zipPath
-            Write-Log "Downloaded NoBlockInput $($asset.Tag)" 'OK'
+            Write-Log "Downloaded NoBlockInput $($asset.Tag) ($($asset.Name))" 'OK'
         }
         catch {
-            Write-Log "Download failed: $($_.Exception.Message). Place release zip in assets\tools\" 'ERROR'
-            return
+            throw "NoBlockInput download failed: $($_.Exception.Message). Place release .7z in assets\tools\"
         }
     }
 
     if (-not $localZip) {
-        Write-Log 'No NoBlockInput zip found. Download from https://github.com/RobotsOnDrugs/Moo.NoBlockInput/releases' 'ERROR'
-        return
+        throw 'No NoBlockInput archive found. Releases are .7z only: https://github.com/RobotsOnDrugs/Moo.NoBlockInput/releases'
     }
 
-    Expand-ZipSafe -Zip $localZip.FullName -Dest $work
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+    Ensure-Dir $work
+    Expand-ArchiveSafe -Archive $localZip.FullName -Dest $work
 
     $dest = Join-Path ${env:ProgramFiles} 'NoBlockInput'
     Ensure-Dir $dest
@@ -1896,7 +2498,7 @@ function Install-ScambaitNoBlockInput {
         Write-Log 'Wiki: https://github.com/RobotsOnDrugs/Moo.NoBlockInput/wiki' 'INFO'
     }
     else {
-        Write-Log 'No executable found in NoBlockInput archive' 'ERROR'
+        throw 'No executable found in NoBlockInput archive'
     }
 }
 #endregion
@@ -1905,8 +2507,13 @@ function Install-ScambaitNoBlockInput {
 #region Install-Micerosoft
 function Install-ScambaitMicerosoft {
     Write-Log 'Installing Micerosoft fake support popup...' 'INFO'
-
     $dest = Join-Path ${env:ProgramFiles} 'Micerosoft'
+    $deskLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Micerosoft.lnk'
+    if (-not $script:Force -and (Test-Path (Join-Path $dest 'popup.html')) -and (Test-Path $deskLnk)) {
+        Write-Log 'Micerosoft popup already installed - skipping' 'OK'
+        return
+    }
+
     Ensure-Dir $dest
 
     $src = Get-AssetPath $script:Config.Paths.Micerosoft
@@ -2022,23 +2629,33 @@ function Install-ScambaitXamppDsjas {
     # --- XAMPP ---
     if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
         $installer = Join-Path $tools $x.InstallerName
-        $local = Get-ChildItem $tools -Filter 'xampp*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $local = Get-ChildItem $tools -Filter 'xampp*.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 50MB } |
+            Select-Object -First 1
         if ($local) { $installer = $local.FullName }
 
-        if (-not (Test-Path $installer) -and -not $script:SkipDownloads) {
-            try {
-                Download-File -Url $x.DownloadUrl -OutFile $installer
+        $needDownload = $script:Force -or -not (Test-Path $installer) -or ((Get-Item $installer -ErrorAction SilentlyContinue).Length -lt 50MB)
+        if ($needDownload -and -not $script:SkipDownloads) {
+            $urls = @($x.DownloadUrl, $x.DownloadUrlAlt) | Where-Object { $_ } | Select-Object -Unique
+            $min = if ($x.MinBytes) { [long]$x.MinBytes } else { 100000000 }
+            $ok = $false
+            foreach ($url in $urls) {
+                try {
+                    Download-File -Url $url -OutFile $installer -MinBytes $min
+                    $ok = $true
+                    break
+                }
+                catch {
+                    Write-Log "XAMPP URL failed: $($_.Exception.Message)" 'WARN'
+                }
             }
-            catch {
-                Write-Log "XAMPP download failed: $($_.Exception.Message)" 'ERROR'
-                Write-Log 'Manually download from https://www.apachefriends.org/ and place the installer in assets\tools\' 'WARN'
-                return
+            if (-not $ok) {
+                throw 'XAMPP download failed from all mirrors. Manually download from https://www.apachefriends.org/ into the tools folder as xampp-installer.exe'
             }
         }
 
-        if (-not (Test-Path $installer)) {
-            Write-Log 'XAMPP installer missing' 'ERROR'
-            return
+        if (-not (Test-Path $installer) -or ((Get-Item $installer).Length -lt 50MB)) {
+            throw 'XAMPP installer missing or corrupt (too small). Place a real installer EXE in the tools folder.'
         }
 
         Write-Log 'Running XAMPP silent-ish install (may show UI on some builds)...' 'INFO'
@@ -2052,8 +2669,7 @@ function Install-ScambaitXamppDsjas {
     }
 
     if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-        Write-Log 'XAMPP does not appear installed - aborting DSJAS steps' 'ERROR'
-        return
+        throw 'XAMPP does not appear installed - aborting DSJAS steps'
     }
 
     # Start Apache + MySQL
@@ -2221,34 +2837,104 @@ if (-not [IO.Path]::IsPathRooted($script:Config.Paths.PersonalFiles)) {
 Write-Log 'Scambait installer starting (single-file / Proxmox Windows 10 guest)' 'INFO'
 Write-Log "Script: $PSCommandPath" 'INFO'
 Write-Log "Work/temp: $script:WorkDir" 'INFO'
+Write-Log "State: $script:StatePath (use -Force to re-run completed steps)" 'INFO'
 Write-Log "Persona: $($script:Config.Persona.FullName) / $($script:Config.Persona.ComputerName)" 'INFO'
 Write-Log 'Host prerequisite: apply proxmox-smbios.conf on the Proxmox node for this VMID.' 'WARN'
+if ($script:Force) { Write-Log 'Force mode: ignoring completion markers' 'WARN' }
 
-Invoke-Step 'Sync GitHub / local media assets' 'SyncGitHubAssets' { Sync-ScambaitGitHubAssets }
-Invoke-Step 'Disable Windows Defender' 'DisableDefender' { Disable-ScambaitDefender }
-Invoke-Step 'Disable Windows Update' 'DisableWindowsUpdate' { Disable-ScambaitWindowsUpdate }
-Invoke-Step 'Disable Telemetry' 'DisableTelemetry' { Disable-ScambaitTelemetry }
-Invoke-Step 'Mask VM artifacts (guest-side)' 'MaskVmArtifacts' { Mask-ScambaitVmArtifacts }
+Invoke-Step 'Sync GitHub / local media assets' 'SyncGitHubAssets' { Sync-ScambaitGitHubAssets } -OnceKey 'SyncGitHubAssets'
+Invoke-Step 'Disable Windows Defender' 'DisableDefender' { Disable-ScambaitDefender } -OnceKey 'DisableDefender'
+Invoke-Step 'Disable Windows Update' 'DisableWindowsUpdate' { Disable-ScambaitWindowsUpdate } -OnceKey 'DisableWindowsUpdate'
+Invoke-Step 'Disable Telemetry' 'DisableTelemetry' { Disable-ScambaitTelemetry } -OnceKey 'DisableTelemetry'
+Invoke-Step 'Mask VM artifacts (guest-side)' 'MaskVmArtifacts' { Mask-ScambaitVmArtifacts } -OnceKey 'MaskVmArtifacts'
 Invoke-Step 'Set computer name' 'SetComputerName' {
     $name = $script:Config.Persona.ComputerName
-    if ((hostname) -ne $name) {
-        Rename-Computer -NewName $name -Force -ErrorAction SilentlyContinue
-        Write-Log "Computer rename scheduled to '$name' (reboot required)" 'WARN'
+    if ((hostname) -eq $name) {
+        Write-Log "Computer name already '$name'" 'OK'
+        return
     }
+    Rename-Computer -NewName $name -Force -ErrorAction SilentlyContinue
+    Write-Log "Computer rename scheduled to '$name' (reboot required)" 'WARN'
+} -OnceKey 'SetComputerName' -IsInstalled { (hostname) -eq $script:Config.Persona.ComputerName }
+Invoke-Step 'Set timezone to Chicago (Central)' 'SetTimezone' {
+    # Location Services "managed by org" only blocks auto-timezone from GPS.
+    # tzutil / Set-TimeZone still work as Administrator.
+    $tz = if ($script:Config.Persona.Timezone) { $script:Config.Persona.Timezone } else { 'Central Standard Time' }
+    if (-not $script:Force -and (Get-TimeZone).Id -eq $tz) {
+        Write-Log "Timezone already $tz" 'OK'
+        return
+    }
+
+    # Turn off automatic time zone (location-based)
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\tzautoupdate' -Name 'Start' -Value 4 -Force -ErrorAction SilentlyContinue
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -Name 'Value' -Value 'Deny' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors' -Name 'DisableLocation' -Value 1
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors' -Name 'DisableLocationScripting' -Value 1
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' -Name 'Type' -Value 'NTP' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+
+    try {
+        Set-TimeZone -Id $tz -ErrorAction Stop
+        Write-Log "Set-TimeZone -> $tz" 'OK'
+    }
+    catch {
+        Write-Log "Set-TimeZone failed ($($_.Exception.Message)); trying tzutil..." 'WARN'
+        & tzutil.exe /s $tz
+        if ($LASTEXITCODE -ne 0) { throw "tzutil failed for '$tz'" }
+        Write-Log "tzutil /s `"$tz`" OK" 'OK'
+    }
+
+    Start-Service w32time -ErrorAction SilentlyContinue
+    w32tm /resync /force 2>$null | Out-Null
+
+    $current = (Get-TimeZone).Id
+    Write-Log "Current timezone: $current | $(Get-Date)" 'INFO'
+    if ($current -ne $tz) {
+        Write-Log "Timezone still '$current' (wanted '$tz'). Re-run elevated or check for conflicting domain GPO." 'WARN'
+    }
+} -OnceKey 'SetTimezone'
+Invoke-Step 'Rename Device Manager entries' 'RenameDevices' { Rename-ScambaitDevices } -OnceKey 'RenameDevices'
+Invoke-Step 'Disguise QEMU Guest Agent' 'DisguiseQemuAgent' { Disguise-ScambaitQemuAgent } -OnceKey 'DisguiseQemuAgent'
+Invoke-Step 'Add fake printer' 'AddFakePrinter' { Add-ScambaitFakePrinter } -OnceKey 'AddFakePrinter' -IsInstalled {
+    [bool](Get-Printer -Name $script:Config.FakePrinter.Name -ErrorAction SilentlyContinue)
 }
-Invoke-Step 'Rename Device Manager entries' 'RenameDevices' { Rename-ScambaitDevices }
-Invoke-Step 'Disguise QEMU Guest Agent' 'DisguiseQemuAgent' { Disguise-ScambaitQemuAgent }
-Invoke-Step 'Add fake printer' 'AddFakePrinter' { Add-ScambaitFakePrinter }
 Invoke-Step 'Install common programs' 'InstallPrograms' { Install-ScambaitPrograms }
-Invoke-Step 'Generate personal files' 'GeneratePersonalFiles' { Generate-ScambaitPersonalFiles }
-Invoke-Step 'Copy wallpapers' 'CopyWallpapers' { Copy-ScambaitWallpapers }
-Invoke-Step 'Seed Downloads folder' 'SeedDownloads' { Seed-ScambaitDownloads }
-Invoke-Step 'Seed Chrome history' 'SeedChromeHistory' { Seed-ScambaitChromeHistory }
-Invoke-Step 'Setup camera loop' 'SetupCameraLoop' { Setup-ScambaitCameraLoop }
-Invoke-Step 'Install Moo.FuckScreenConnect' 'InstallFuckScreenConnect' { Install-ScambaitFuckScreenConnect }
-Invoke-Step 'Install Moo.NoBlockInput' 'InstallNoBlockInput' { Install-ScambaitNoBlockInput }
-Invoke-Step 'Install Micerosoft fake popup' 'InstallMicerosoftPopup' { Install-ScambaitMicerosoft }
-Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppDsjas }
+Invoke-Step 'Set Chrome as default browser' 'SetChromeDefaults' { Set-ScambaitChromeDefaults } -OnceKey 'SetChromeDefaults'
+Invoke-Step 'Generate personal files' 'GeneratePersonalFiles' { Generate-ScambaitPersonalFiles } -OnceKey 'GeneratePersonalFiles' -IsInstalled {
+    Test-Path (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Passwords\accounts_backup.txt')
+}
+Invoke-Step 'Copy wallpapers' 'CopyWallpapers' { Copy-ScambaitWallpapers } -OnceKey 'CopyWallpapers' -IsInstalled {
+    $d = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Wallpapers'
+    (Test-Path $d) -and [bool](Get-ChildItem $d -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+Invoke-Step 'Seed Downloads folder' 'SeedDownloads' { Seed-ScambaitDownloads } -OnceKey 'SeedDownloads' -IsInstalled {
+    $dl = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+    if (-not $dl) { $dl = Join-Path $env:USERPROFILE 'Downloads' }
+    Test-Path (Join-Path $dl 'how_to_use_gmail_notes.txt')
+}
+Invoke-Step 'Seed Chrome history' 'SeedChromeHistory' { Seed-ScambaitChromeHistory } -OnceKey 'SeedChromeHistory' -IsInstalled {
+    Test-ScambaitChromeHistoryPopulated
+}
+Invoke-Step 'Setup camera loop' 'SetupCameraLoop' { Setup-ScambaitCameraLoop } -OnceKey 'SetupCameraLoop' -IsInstalled {
+    $dir = $script:Config.Camera.InstallDir
+    (Test-Path (Join-Path $dir 'hp_image_feed.py')) -and
+    [bool](Get-ScheduledTask -TaskName $script:Config.Camera.TaskName -ErrorAction SilentlyContinue)
+}
+Invoke-Step 'Install Moo.FuckScreenConnect' 'InstallFuckScreenConnect' { Install-ScambaitFuckScreenConnect } -OnceKey 'InstallFuckScreenConnect' -IsInstalled {
+    (Test-Path (Join-Path ${env:ProgramFiles} 'FuckScreenConnect')) -or
+    [bool](Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'FuckScreen|FSC' -or $_.DisplayName -match 'FuckScreen' } | Select-Object -First 1)
+}
+Invoke-Step 'Install Moo.NoBlockInput' 'InstallNoBlockInput' { Install-ScambaitNoBlockInput } -OnceKey 'InstallNoBlockInput' -IsInstalled {
+    Test-Path (Join-Path ${env:ProgramFiles} 'NoBlockInput')
+}
+Invoke-Step 'Install Micerosoft fake popup' 'InstallMicerosoftPopup' { Install-ScambaitMicerosoft } -OnceKey 'InstallMicerosoftPopup' -IsInstalled {
+    Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Micerosoft.lnk')
+}
+Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppDsjas } -OnceKey 'InstallXamppDsjas' -IsInstalled {
+    $htdocs = Join-Path $script:Config.Xampp.InstallDir 'htdocs'
+    (Test-Path (Join-Path $script:Config.Xampp.InstallDir 'xampp-control.exe')) -and (
+        (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
+    )
+}
 
 Invoke-Step 'Write Proxmox host instructions to Desktop' $null {
     $desk = [Environment]::GetFolderPath('Desktop')

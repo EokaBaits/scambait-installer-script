@@ -13,7 +13,7 @@ cd scambait-installer
 ```text
 assets/
   camera/
-    webcam_loop.mp4      # looped elderly webcam face (keep under ~50MB if possible)
+    webcam_loop.mp4      # looped elderly webcam face; hidden feeder (no OBS), keep under ~50MB
   wallpapers/
     *.jpg / *.png        # right-click Set as desktop background targets
   personal-files/        # optional extras copied into Documents
