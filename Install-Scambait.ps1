@@ -2967,10 +2967,8 @@ function Update-XamppInternalPaths {
     )
     $newRoot = $InstallDir.TrimEnd('\')
     $newFwd = $newRoot -replace '\\', '/'
-    $patterns = @(
-        '*.conf', '*.ini', '*.bat', '*.txt', '*.cfg', '*.xml', '*.properties', '*.yml', '*.yaml'
-    )
-    $files = Get-ChildItem -LiteralPath $InstallDir -Recurse -File -Include $patterns -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -Path $InstallDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -match '\.(conf|ini|bat|txt|cfg|xml|properties|yml|yaml)$' }
     $changed = 0
     foreach ($f in $files) {
         if ($f.Length -gt 5MB) { continue }
@@ -2996,7 +2994,8 @@ function Update-XamppInternalPaths {
 
 function Move-XamppTree {
     param([string]$Source, [string]$Dest)
-    Ensure-Dir (Split-Path -LiteralPath $Dest -Parent)
+    $parent = [IO.Path]::GetDirectoryName($Dest.TrimEnd('\', '/'))
+    if ($parent) { Ensure-Dir $parent }
     if (Test-Path -LiteralPath $Dest) {
         Remove-XamppTreeForce -Dir $Dest -Reason 'replace before migrate'
     }
@@ -3009,7 +3008,7 @@ function Move-XamppTree {
         New-Item -ItemType Directory -Path $Dest -Force | Out-Null
         & robocopy.exe $Source $Dest /E /COPY:DAT /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
         if (-not (Test-XamppDirHasTree -Dir $Dest)) {
-            Copy-Item -LiteralPath (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
+            Copy-Item -Path (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
         }
         Remove-XamppTreeForce -Dir $Source -Reason 'after copy-migrate'
     }
