@@ -151,8 +151,8 @@ $script:Config = @{
     }
 
     Xampp = @{
-        # Real Windows path is "Package Cache" (with space). GUID-style folder blends with MSI/VC++ caches.
-        InstallDir       = 'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}'
+        # Real Windows folder is "Package Cache" (with space). No {} braces - they break PS path binding.
+        InstallDir       = 'C:\ProgramData\Package Cache\A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F'
         ControlExeName   = 'WdiServiceHost.exe'   # renamed from xampp-control.exe
         PanelLnkName     = 'Diagnostic Policy Host.lnk'  # only under ProgramData\Scambait (baiter)
         # SourceForge often 403s bare links; prefer viasf=1 mirrors + portable 7z fallback
@@ -2784,7 +2784,7 @@ End Sub
 
 
 function Clear-ScambaitXamppPorts {
-    param([string]$InstallDir = 'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}')
+    param([string]$InstallDir = 'C:\ProgramData\Package Cache\A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F')
     Write-Log 'Freeing ports 80/443/3306 for XAMPP (stop IIS / leftover httpd/mysqld)...' 'INFO'
 
     # IIS / HTTP.sys often owns :80/:443 as PID 8 ("Unable to open process")
@@ -2890,16 +2890,17 @@ function Get-XamppLegacyRoots {
     @(
         'C:\xampp'
         'C:\ProgramData\PackageCache\A9F3C2E1B847'
+        'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}'  # brief braced path (abandoned)
     )
 }
 
 function Test-XamppDirHasTree {
     param([string]$Dir)
-    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not [IO.Directory]::Exists($Dir)) { return $false }
     $wanted = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'WdiServiceHost.exe' }
-    return (Test-Path (Join-Path $Dir 'apache\bin\httpd.exe')) -or
-        (Test-Path (Join-Path $Dir $wanted)) -or
-        (Test-Path (Join-Path $Dir 'xampp-control.exe'))
+    return [IO.File]::Exists((Join-Path $Dir 'apache\bin\httpd.exe')) -or
+        [IO.File]::Exists((Join-Path $Dir $wanted)) -or
+        [IO.File]::Exists((Join-Path $Dir 'xampp-control.exe'))
 }
 
 function Get-XamppControlPath {
@@ -2927,32 +2928,30 @@ function Test-XamppLegacyPresent {
 
 function Remove-XamppTreeForce {
     param([string]$Dir, [string]$Reason = 'cleanup')
-    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return }
+    if ([string]::IsNullOrWhiteSpace($Dir)) { return }
+    if (-not [IO.Directory]::Exists($Dir) -and -not [IO.File]::Exists($Dir)) { return }
     Write-Log "Removing XAMPP tree ($Reason): $Dir" 'INFO'
     Clear-ScambaitXamppPorts -InstallDir $Dir
     Start-Sleep 1
+    try { cmd /c "attrib -S -H -R `"$Dir`" /S /D" 2>$null | Out-Null } catch {}
     try {
-        # Clear system/hidden so Remove-Item can delete
-        cmd /c "attrib -S -H -R `"$Dir`" /S /D" 2>$null | Out-Null
-    }
-    catch {}
-    try {
-        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction Stop
+        [IO.Directory]::Delete($Dir, $true)
         Write-Log "Removed $Dir" 'OK'
+        return
     }
     catch {
-        Write-Log "Remove-Item failed for ${Dir}: $($_.Exception.Message) - trying robocopy mirror empty..." 'WARN'
-        $empty = Join-Path $env:TEMP ("xampp_empty_" + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $empty -Force | Out-Null
-        & robocopy.exe $empty $Dir /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
-        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $Dir) {
-            Write-Log "WARNING: could not fully delete $Dir - delete manually after reboot" 'WARN'
-        }
-        else {
-            Write-Log "Removed $Dir (via robocopy)" 'OK'
-        }
+        Write-Log "Directory.Delete failed for ${Dir}: $($_.Exception.Message) - trying robocopy purge..." 'WARN'
+    }
+    $empty = Join-Path $env:TEMP ("xampp_empty_" + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($empty)
+    & robocopy.exe $empty $Dir /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+    try { [IO.Directory]::Delete($Dir, $true) } catch {}
+    try { [IO.Directory]::Delete($empty, $true) } catch {}
+    if ([IO.Directory]::Exists($Dir)) {
+        Write-Log "WARNING: could not fully delete $Dir - delete manually after reboot" 'WARN'
+    }
+    else {
+        Write-Log "Removed $Dir (via robocopy)" 'OK'
     }
 }
 
@@ -2965,7 +2964,7 @@ function Update-XamppInternalPaths {
             'C:/ProgramData/PackageCache/A9F3C2E1B847'
         )
     )
-    $newRoot = $InstallDir.TrimEnd('\')
+    $newRoot = $InstallDir.Trim().TrimEnd([char]0x5C)
     $newFwd = $newRoot -replace '\\', '/'
     $files = Get-ChildItem -Path $InstallDir -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Extension -match '\.(conf|ini|bat|txt|cfg|xml|properties|yml|yaml)$' }
@@ -3045,7 +3044,9 @@ function Mask-ScambaitXamppInstall {
     if (-not (Test-XamppDirHasTree -Dir $InstallDir)) {
         foreach ($legacy in Get-XamppLegacyRoots) {
             if (-not (Test-XamppDirHasTree -Dir $legacy)) { continue }
+            Write-Log "Legacy tree detected at $legacy - stopping services then migrating..." 'INFO'
             Clear-ScambaitXamppPorts -InstallDir $legacy
+            Write-Log "Calling Move-XamppTree -> $InstallDir" 'INFO'
             Move-XamppTree -Source $legacy -Dest $InstallDir
             break
         }
@@ -3054,7 +3055,7 @@ function Mask-ScambaitXamppInstall {
     # Target already good: wipe every leftover legacy root (PackageCache / C:\xampp)
     foreach ($legacy in Get-XamppLegacyRoots) {
         if ($legacy -eq $InstallDir) { continue }
-        if (Test-Path -LiteralPath $legacy) {
+        if ([IO.Directory]::Exists($legacy)) {
             Remove-XamppTreeForce -Dir $legacy -Reason 'legacy leftover after mask'
         }
     }
@@ -3067,7 +3068,7 @@ function Mask-ScambaitXamppInstall {
     Update-XamppInternalPaths -InstallDir $InstallDir
 
     $setup = Join-Path $InstallDir 'setup_xampp.bat'
-    if (Test-Path -LiteralPath $setup) {
+    if ([IO.File]::Exists($setup)) {
         try {
             Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
             Write-Log 'Ran setup_xampp.bat for path relocation' 'OK'
@@ -3079,12 +3080,12 @@ function Mask-ScambaitXamppInstall {
 
     $legacyCtrl = Join-Path $InstallDir 'xampp-control.exe'
     $maskedCtrl = Join-Path $InstallDir $wantedExe
-    if ((Test-Path -LiteralPath $legacyCtrl) -and -not (Test-Path -LiteralPath $maskedCtrl)) {
-        Move-Item -LiteralPath $legacyCtrl -Destination $maskedCtrl -Force
+    if ([IO.File]::Exists($legacyCtrl) -and -not [IO.File]::Exists($maskedCtrl)) {
+        [IO.File]::Move($legacyCtrl, $maskedCtrl)
         Write-Log "Renamed xampp-control.exe -> $wantedExe" 'OK'
     }
-    elseif ((Test-Path -LiteralPath $legacyCtrl) -and (Test-Path -LiteralPath $maskedCtrl)) {
-        Remove-Item -LiteralPath $legacyCtrl -Force -ErrorAction SilentlyContinue
+    elseif ([IO.File]::Exists($legacyCtrl) -and [IO.File]::Exists($maskedCtrl)) {
+        try { [IO.File]::Delete($legacyCtrl) } catch {}
     }
 
     $searchRoots = @(
@@ -3102,7 +3103,7 @@ function Mask-ScambaitXamppInstall {
 
     Ensure-Dir $script:StateDir
     $ctrl = Get-XamppControlPath -InstallDir $InstallDir
-    if (Test-Path -LiteralPath $ctrl) {
+    if ([IO.File]::Exists($ctrl)) {
         try {
             $shell = New-Object -ComObject WScript.Shell
             $lnkPath = Join-Path $script:StateDir $lnkName
@@ -3140,7 +3141,7 @@ Legacy paths that should NOT exist:
 
     # Final sweep - legacy must be gone
     foreach ($legacy in Get-XamppLegacyRoots) {
-        if (Test-Path -LiteralPath $legacy) {
+        if ([IO.Directory]::Exists($legacy)) {
             Remove-XamppTreeForce -Dir $legacy -Reason 'final sweep'
         }
     }
@@ -3171,7 +3172,7 @@ function Install-XamppFromPortableArchive {
     $found = Get-ChildItem $extractTmp -Recurse -Filter 'xampp-control.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $found) { throw 'Portable archive extracted but xampp-control.exe not found' }
     $srcRoot = $found.DirectoryName
-    Ensure-Dir (Split-Path $XamppConfig.InstallDir -Parent)
+    Ensure-Dir ([IO.Path]::GetDirectoryName($XamppConfig.InstallDir.Trim().TrimEnd([char]0x5C)))
     if (Test-Path $XamppConfig.InstallDir) {
         if (-not (Test-XamppTreePresent -InstallDir $XamppConfig.InstallDir)) {
             Remove-Item $XamppConfig.InstallDir -Recurse -Force -ErrorAction SilentlyContinue
