@@ -3142,13 +3142,13 @@ function Repair-XamppMysqlDataPermissions {
 
 function Enable-XamppPhpExtensionsForDsjas {
     param([string]$InstallDir)
-    $phpIniCandidates = @(
-        (Join-Path $InstallDir 'php\php.ini')
-        (Join-Path $InstallDir 'php\php.ini-production')
-        (Join-Path $InstallDir 'apache\bin\php.ini')
-    )
-    $phpIni = $phpIniCandidates | Where-Object { [IO.File]::Exists($_) -and $_.EndsWith('php.ini') } | Select-Object -First 1
-    if (-not $phpIni) {
+    # Prefer real php.ini only (never treat php.ini-production as the live file via EndsWith)
+    $phpIni = Join-Path $InstallDir 'php\php.ini'
+    $apacheIni = Join-Path $InstallDir 'apache\bin\php.ini'
+    if (-not [IO.File]::Exists($phpIni) -and [IO.File]::Exists($apacheIni) -and ([IO.Path]::GetFileName($apacheIni) -eq 'php.ini')) {
+        $phpIni = $apacheIni
+    }
+    if (-not [IO.File]::Exists($phpIni)) {
         # First-run XAMPP sometimes only ships php.ini-development / production
         $dev = Join-Path $InstallDir 'php\php.ini-development'
         $prod = Join-Path $InstallDir 'php\php.ini-production'
@@ -3164,7 +3164,7 @@ function Enable-XamppPhpExtensionsForDsjas {
             Write-Log 'Created php\php.ini from php.ini-development' 'INFO'
         }
     }
-    if (-not $phpIni -or -not [IO.File]::Exists($phpIni)) {
+    if (-not $phpIni -or -not [IO.File]::Exists($phpIni) -or ([IO.Path]::GetFileName($phpIni) -ne 'php.ini')) {
         Write-Log 'php.ini not found - cannot enable DSJAS PHP modules' 'WARN'
         return $false
     }
@@ -3254,6 +3254,181 @@ function Enable-XamppPhpExtensionsForDsjas {
     Get-Process httpd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 1
     return $true
+}
+
+function Test-XamppPhpExtensionsReady {
+    param([string]$InstallDir = $(if ($script:Config.Xampp.InstallDir) { $script:Config.Xampp.InstallDir } else { '' }))
+    if ([string]::IsNullOrWhiteSpace($InstallDir)) { return $false }
+    $phpIni = Join-Path $InstallDir 'php\php.ini'
+    if (-not [IO.File]::Exists($phpIni)) { return $false }
+    try {
+        $raw = [IO.File]::ReadAllText($phpIni)
+    }
+    catch {
+        return $false
+    }
+    foreach ($mod in @('mysqli', 'exif', 'curl', 'intl', 'zip')) {
+        if ($raw -notmatch "(?im)^\s*extension\s*=\s*(php_)?$([regex]::Escape($mod))(\.dll)?\s*$") {
+            return $false
+        }
+    }
+    return $true
+}
+
+function ConvertTo-PemBody {
+    param([byte[]]$Bytes)
+    $b64 = [Convert]::ToBase64String($Bytes)
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $b64.Length; $i += 64) {
+        $len = [Math]::Min(64, $b64.Length - $i)
+        [void]$sb.AppendLine($b64.Substring($i, $len))
+    }
+    return $sb.ToString().TrimEnd()
+}
+
+function New-DerLength {
+    param([int]$Length)
+    if ($Length -lt 128) {
+        return [byte[]]@([byte]$Length)
+    }
+    if ($Length -lt 256) {
+        return [byte[]]@(0x81, [byte]$Length)
+    }
+    return [byte[]]@(0x82, [byte](($Length -shr 8) -band 0xff), [byte]($Length -band 0xff))
+}
+
+function New-DerInteger {
+    param([byte[]]$Raw)
+    if (-not $Raw -or $Raw.Length -eq 0) { $Raw = [byte[]]@(0) }
+    $start = 0
+    while ($start -lt ($Raw.Length - 1) -and $Raw[$start] -eq 0) { $start++ }
+    $sliceLen = $Raw.Length - $start
+    $needPad = ($Raw[$start] -band 0x80) -ne 0
+    $payloadLen = $sliceLen + $(if ($needPad) { 1 } else { 0 })
+    $payload = New-Object byte[] $payloadLen
+    $offset = 0
+    if ($needPad) {
+        $payload[0] = 0
+        $offset = 1
+    }
+    [Array]::Copy($Raw, $start, $payload, $offset, $sliceLen)
+    $lenBytes = New-DerLength -Length $payload.Length
+    $out = New-Object byte[] (1 + $lenBytes.Length + $payload.Length)
+    $out[0] = 0x02
+    [Array]::Copy($lenBytes, 0, $out, 1, $lenBytes.Length)
+    [Array]::Copy($payload, 0, $out, 1 + $lenBytes.Length, $payload.Length)
+    return $out
+}
+
+function New-DerSequence {
+    param([byte[][]]$Elements)
+    $total = 0
+    foreach ($e in $Elements) { $total += $e.Length }
+    $inner = New-Object byte[] $total
+    $pos = 0
+    foreach ($e in $Elements) {
+        [Array]::Copy($e, 0, $inner, $pos, $e.Length)
+        $pos += $e.Length
+    }
+    $lenBytes = New-DerLength -Length $inner.Length
+    $out = New-Object byte[] (1 + $lenBytes.Length + $inner.Length)
+    $out[0] = 0x30
+    [Array]::Copy($lenBytes, 0, $out, 1, $lenBytes.Length)
+    [Array]::Copy($inner, 0, $out, 1 + $lenBytes.Length, $inner.Length)
+    return $out
+}
+
+function Export-RsaPrivateKeyPkcs1Pem {
+    param($Rsa)
+    $p = $Rsa.ExportParameters($true)
+    $der = New-DerSequence -Elements @(
+        (New-DerInteger -Raw ([byte[]]@(0))),
+        (New-DerInteger -Raw $p.Modulus),
+        (New-DerInteger -Raw $p.Exponent),
+        (New-DerInteger -Raw $p.D),
+        (New-DerInteger -Raw $p.P),
+        (New-DerInteger -Raw $p.Q),
+        (New-DerInteger -Raw $p.DP),
+        (New-DerInteger -Raw $p.DQ),
+        (New-DerInteger -Raw $p.InverseQ)
+    )
+    $body = ConvertTo-PemBody -Bytes $der
+    return "-----BEGIN RSA PRIVATE KEY-----`r`n$body`r`n-----END RSA PRIVATE KEY-----`r`n"
+}
+
+function New-ScambaitBankCertificateFiles {
+    param(
+        [string]$CrtPath,
+        [string]$KeyPath,
+        [string]$CerPath,
+        [string[]]$DnsNames,
+        [string]$CommonName
+    )
+
+    # Pure .NET - no openssl required (XAMPP openssl often fails under Package Cache paths)
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    try {
+        $dn = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            "CN=$CommonName, O=Midwest Community Bank, L=Chicago, S=Illinois, C=US"
+        )
+        $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            $dn,
+            $rsa,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+        )
+
+        $san = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        foreach ($h in $DnsNames) {
+            if ($h -match '^\d+\.\d+\.\d+\.\d+$') {
+                $san.AddIpAddress([Net.IPAddress]::Parse($h))
+            }
+            else {
+                $san.AddDnsName($h)
+            }
+        }
+        if ($DnsNames -notcontains '127.0.0.1') {
+            $san.AddIpAddress([Net.IPAddress]::Parse('127.0.0.1'))
+        }
+        $req.CertificateExtensions.Add($san.Build($false))
+        $req.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $false)
+        )
+        $ku = [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -bor
+            [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyEncipherment
+        $req.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new($ku, $true)
+        )
+        $oids = [System.Security.Cryptography.OidCollection]::new()
+        [void]$oids.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+        $req.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false)
+        )
+
+        $notBefore = [DateTimeOffset]::UtcNow.AddDays(-1)
+        $notAfter = [DateTimeOffset]::UtcNow.AddYears(10)
+        $cert = $req.CreateSelfSigned($notBefore, $notAfter)
+
+        $certPem = "-----BEGIN CERTIFICATE-----`r`n$(ConvertTo-PemBody -Bytes $cert.RawData)`r`n-----END CERTIFICATE-----`r`n"
+        $keyPem = Export-RsaPrivateKeyPkcs1Pem -Rsa $rsa
+        [IO.File]::WriteAllText($CrtPath, $certPem, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($KeyPath, $keyPem, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes($CerPath, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+
+        # Also drop into LocalMachine\My so Windows tools can see it
+        try {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+            $store.Open('ReadWrite')
+            $store.Add($cert)
+            $store.Close()
+        }
+        catch {}
+
+        return $true
+    }
+    finally {
+        if ($rsa) { $rsa.Dispose() }
+    }
 }
 
 function Get-ScambaitBankHostnames {
@@ -3363,110 +3538,28 @@ function Enable-ScambaitBankSsl {
     $crtPath = Join-Path $crtDir 'scambait-bank.crt'
     $keyPath = Join-Path $keyDir 'scambait-bank.key'
     $cerPath = Join-Path $crtDir 'scambait-bank.cer'
-    $cnfPath = Join-Path $script:WorkDir 'scambait-bank-openssl.cnf'
 
     Write-Log "Generating trusted SSL cert for $domain (Apache + Windows Root)..." 'INFO'
 
-    $altLines = @()
-    $n = 1
-    foreach ($h in $hosts) {
-        $altLines += "DNS.$n = $h"
-        $n++
+    $needNew = $script:Force -or -not ([IO.File]::Exists($crtPath) -and [IO.File]::Exists($keyPath))
+    if ($needNew) {
+        New-ScambaitBankCertificateFiles -CrtPath $crtPath -KeyPath $keyPath -CerPath $cerPath `
+            -DnsNames $hosts -CommonName "www.$domain" | Out-Null
+        if (-not ([IO.File]::Exists($crtPath) -and [IO.File]::Exists($keyPath))) {
+            throw 'Failed to write Apache SSL certificate/key PEM files.'
+        }
+        Write-Log 'Created scambait-bank.crt / .key via .NET (no openssl)' 'OK'
     }
-    $altLines += 'IP.1 = 127.0.0.1'
-    $altBlock = $altLines -join "`r`n"
-
-    @"
-[req]
-default_bits = 2048
-prompt = no
-default_md = sha256
-distinguished_name = dn
-x509_extensions = v3_req
-
-[dn]
-C = US
-ST = Illinois
-L = Chicago
-O = Midwest Community Bank
-CN = www.$domain
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-$altBlock
-"@ | Set-Content -Path $cnfPath -Encoding ASCII
-
-    $openssl = Join-Path $InstallDir 'apache\bin\openssl.exe'
-    if (-not [IO.File]::Exists($openssl)) {
-        $openssl = Join-Path $InstallDir 'php\extras\ssl\openssl.exe'
-    }
-
-    $made = $false
-    if ([IO.File]::Exists($openssl)) {
-        $proc = Start-Process -FilePath $openssl -ArgumentList @(
-            'req', '-x509', '-nodes', '-days', '3650', '-newkey', 'rsa:2048',
-            '-keyout', $keyPath, '-out', $crtPath, '-config', $cnfPath
-        ) -Wait -PassThru -WindowStyle Hidden
-        if ($proc.ExitCode -eq 0 -and [IO.File]::Exists($crtPath) -and [IO.File]::Exists($keyPath)) {
-            $made = $true
-            Write-Log 'OpenSSL created scambait-bank.crt / .key' 'OK'
-        }
-        else {
-            Write-Log "OpenSSL cert gen exit $($proc.ExitCode) - falling back to New-SelfSignedCertificate" 'WARN'
-        }
-    }
-
-    if (-not $made) {
-        # Fallback: Windows self-signed + export PEM via openssl pkcs12 if available
-        $dns = $hosts
-        $cert = New-SelfSignedCertificate -DnsName $dns -CertStoreLocation 'Cert:\LocalMachine\My' `
-            -FriendlyName 'Dell System SSL' -KeyExportPolicy Exportable -HashAlgorithm SHA256 `
-            -KeyLength 2048 -NotAfter (Get-Date).AddYears(10) `
-            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.1')
-        $pwd = ConvertTo-SecureString -String 'scambait' -Force -AsPlainText
-        $pfx = Join-Path $script:WorkDir 'scambait-bank.pfx'
-        Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pwd | Out-Null
-        Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
-
-        if ([IO.File]::Exists($openssl)) {
-            $env:OPENSSL_CONF = $cnfPath
-            Start-Process -FilePath $openssl -ArgumentList @(
-                'pkcs12', '-in', $pfx, '-nokeys', '-clcerts', '-out', $crtPath, '-passin', 'pass:scambait'
-            ) -Wait -WindowStyle Hidden | Out-Null
-            Start-Process -FilePath $openssl -ArgumentList @(
-                'pkcs12', '-in', $pfx, '-nocerts', '-nodes', '-out', $keyPath, '-passin', 'pass:scambait'
-            ) -Wait -WindowStyle Hidden | Out-Null
-        }
-        if (-not [IO.File]::Exists($crtPath)) {
-            # Minimal PEM from DER cert (Apache still needs a key - keep PFX path only if openssl worked)
-            $der = $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-            $b64 = [Convert]::ToBase64String($der, [Base64FormattingOptions]::InsertLineBreaks)
-            @"
------BEGIN CERTIFICATE-----
-$b64
------END CERTIFICATE-----
-"@ | Set-Content -Path $crtPath -Encoding ASCII
-        }
-        if (-not [IO.File]::Exists($keyPath)) {
-            throw 'Could not export private key for Apache SSL (openssl missing/failed).'
-        }
-        $made = $true
-        Write-Log 'Created bank SSL cert via New-SelfSignedCertificate' 'OK'
-    }
-
-    # DER .cer for certutil trust store
-    if (-not [IO.File]::Exists($cerPath) -and [IO.File]::Exists($crtPath)) {
-        try {
-            $x = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crtPath)
-            [IO.File]::WriteAllBytes($cerPath, $x.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-        }
-        catch {
-            Copy-Item -LiteralPath $crtPath -Destination $cerPath -Force
+    else {
+        Write-Log 'Existing scambait-bank.crt / .key reused' 'INFO'
+        if (-not [IO.File]::Exists($cerPath)) {
+            try {
+                $x = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crtPath)
+                [IO.File]::WriteAllBytes($cerPath, $x.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            }
+            catch {
+                Copy-Item -LiteralPath $crtPath -Destination $cerPath -Force
+            }
         }
     }
 
@@ -3504,7 +3597,6 @@ $b64
         $sc = [regex]::Replace($sc, '(?im)^(\s*ServerName\s+).*$', "`${1}www.$domain`:443")
         $sc = [regex]::Replace($sc, '(?im)^(\s*SSLCertificateFile\s+).*$', "`${1}`"$crtFwd`"")
         $sc = [regex]::Replace($sc, '(?im)^(\s*SSLCertificateKeyFile\s+).*$', "`${1}`"$keyFwd`"")
-        # Ensure ServerAlias for apex + localhost inside the SSL vhost (best-effort)
         if ($sc -notmatch '(?im)^\s*ServerAlias\s+') {
             $sc = [regex]::Replace($sc, '(?im)^(\s*ServerName\s+.+)$', "`$1`r`nServerAlias $domain localhost")
         }
@@ -3985,7 +4077,13 @@ FLUSH PRIVILEGES;
     Add-HostsEntry -Ip $bankIp -Hostname $persona.BankDomain
     Add-HostsEntry -Ip $bankIp -Hostname "www.$($persona.BankDomain)"
 
-    Enable-ScambaitBankSsl -InstallDir $x.InstallDir
+    # SSL is its own step; never let cert failure roll back PHP/DSJAS work
+    try {
+        Enable-ScambaitBankSsl -InstallDir $x.InstallDir
+    }
+    catch {
+        Write-Log "Bank SSL setup deferred: $($_.Exception.Message)" 'WARN'
+    }
 
     # Baiter notes (no Desktop chrome-flags file - SSL is automated)
     Ensure-Dir $script:StateDir
@@ -4145,16 +4243,22 @@ Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppD
     $atCorrectPath = Test-XamppTreePresent -InstallDir $dir
     $noLegacy = -not (Test-XamppLegacyPresent)
     $dsjasOk = (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
-    $atCorrectPath -and $noLegacy -and $dsjasOk
+    $phpOk = Test-XamppPhpExtensionsReady -InstallDir $dir
+    $atCorrectPath -and $noLegacy -and $dsjasOk -and $phpOk
 }
 Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
     $dir = $script:Config.Xampp.InstallDir
     if (-not (Test-XamppTreePresent -InstallDir $dir)) {
         throw 'XAMPP not installed - run Install XAMPP + DSJAS first'
     }
+    # Always (re)apply PHP modules here so SSL failures never leave DSJAS broken
+    Enable-XamppPhpExtensionsForDsjas -InstallDir $dir
     Enable-ScambaitBankSsl -InstallDir $dir
+    if (-not (Get-Process httpd -ErrorAction SilentlyContinue)) {
+        Start-ScambaitXamppServices -InstallDir $dir
+    }
 } -OnceKey 'ConfigureBankSsl' -IsInstalled {
-    Test-ScambaitBankSslReady
+    (Test-ScambaitBankSslReady) -and (Test-XamppPhpExtensionsReady -InstallDir $script:Config.Xampp.InstallDir)
 }
 
 Invoke-Step 'Write Proxmox host instructions to Desktop' $null {
