@@ -47,7 +47,7 @@ $script:Config = @{
         StateFull      = 'Illinois'
         Zip            = '60636'
         Timezone       = 'Central Standard Time'
-        BankDomain     = 'midwestcommunitybank.com'
+        BankDomain     = 'mbwi.com'
         BankDbName     = 'bank'
         BankDbUser     = 'waltergreene60636'
         BankDbPassword = 'WeNeedToCook'
@@ -750,6 +750,21 @@ function Get-DefaultGatewayIPv4 {
     return '10.0.2.2'
 }
 
+function Remove-HostsEntry {
+    param([string]$Hostname)
+    $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+    if (-not (Test-Path $hostsPath)) { return }
+    $lines = @(Get-Content $hostsPath -ErrorAction SilentlyContinue)
+    if (-not $lines) { return }
+    $hostPattern = "^\s*\d{1,3}(\.\d{1,3}){3}\s+$([regex]::Escape($Hostname))(\s|#|$)"
+    $kept = @($lines | Where-Object { $_ -notmatch $hostPattern })
+    if ($kept.Count -lt $lines.Count) {
+        Set-Content -Path $hostsPath -Value $kept -Encoding ASCII -Force
+        Write-Log "Hosts: removed $Hostname" 'OK'
+        try { & ipconfig /flushdns | Out-Null } catch {}
+    }
+}
+
 function Add-HostsEntry {
     param([string]$Ip, [string]$Hostname)
     $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
@@ -934,12 +949,24 @@ function Mask-ScambaitVmArtifacts {
     Write-Log 'True BIOS/OEM strings for msinfo32 require host SMBIOS - see host\proxmox-smbios.conf' 'WARN'
 
     # Hide Hypervisor-present bit from some naive checks (does not fool everything)
-    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name 'PROCESSOR_IDENTIFIER' -Value 'Intel64 Family 6 Model 158 Stepping 10, GenuineIntel' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+    # Raptor Lake Refresh-ish identifier (i7-14700 class) - Family 6 Model 183
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name 'PROCESSOR_IDENTIFIER' -Value 'Intel64 Family 6 Model 183 Stepping 1, GenuineIntel' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+
+    # Task Manager / WMI often read these per-logical-processor keys (base MHz + name)
+    $cpuName = 'Intel(R) Core(TM) i7-14700'
+    $cpuMhz = 2100  # i7-14700 P-core base ~2.1 GHz (Task Manager "Base speed")
+    Get-ChildItem 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor' -ErrorAction SilentlyContinue | ForEach-Object {
+        Set-ItemProperty -Path $_.PSPath -Name 'ProcessorNameString' -Value $cpuName -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $_.PSPath -Name '~MHz' -Value $cpuMhz -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $_.PSPath -Name 'VendorIdentifier' -Value 'GenuineIntel' -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $_.PSPath -Name 'Identifier' -Value 'Intel64 Family 6 Model 183 Stepping 1' -Force -ErrorAction SilentlyContinue
+    }
+    Write-Log "Guest CPU registry patched toward $cpuName @ ${cpuMhz}MHz" 'OK'
 
     # OEM info shown in System Properties
     $oem = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
     Set-RegistryValue -Path $oem -Name 'Manufacturer' -Value 'Dell Inc.' -Type ([Microsoft.Win32.RegistryValueKind]::String)
-    Set-RegistryValue -Path $oem -Name 'Model' -Value 'OptiPlex 7070' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+    Set-RegistryValue -Path $oem -Name 'Model' -Value 'OptiPlex 7020' -Type ([Microsoft.Win32.RegistryValueKind]::String)
     Set-RegistryValue -Path $oem -Name 'SupportURL' -Value 'https://www.dell.com/support' -Type ([Microsoft.Win32.RegistryValueKind]::String)
     Set-RegistryValue -Path $oem -Name 'SupportPhone' -Value '1-800-999-3355' -Type ([Microsoft.Win32.RegistryValueKind]::String)
 
@@ -3516,11 +3543,19 @@ function Get-ScambaitBankHostnames {
 
 function Test-ScambaitBankSslReady {
     $dir = $script:Config.Xampp.InstallDir
+    $domain = $script:Config.Persona.BankDomain
     $cer = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.cer'
     $crt = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.crt'
     $key = Join-Path $dir 'apache\conf\ssl.key\scambait-bank.key'
     if (-not [IO.File]::Exists($key)) { return $false }
     if (-not ([IO.File]::Exists($cer) -or [IO.File]::Exists($crt))) { return $false }
+    # Wrong/old domain cert must fail verification so ConfigureBankSsl re-runs
+    if ([IO.File]::Exists($crt)) {
+        try {
+            if ([IO.File]::ReadAllText($crt) -notmatch [regex]::Escape($domain)) { return $false }
+        }
+        catch { return $false }
+    }
     try {
         $cert = $null
         if ([IO.File]::Exists($cer)) {
@@ -3530,6 +3565,9 @@ function Test-ScambaitBankSslReady {
             $raw = [IO.File]::ReadAllText($crt)
             $b64 = [regex]::Replace($raw, '-----[^-]+-----', '') -replace '\s', ''
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[Convert]::FromBase64String($b64))
+        }
+        if ($cert.Subject -notmatch [regex]::Escape($domain) -and $cert.GetNameInfo('SimpleName', $false) -notmatch [regex]::Escape($domain)) {
+            # SAN may still have it; subject check alone is not enough - PEM text check above covers SAN for our generator
         }
         $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
             [System.Security.Cryptography.X509Certificates.StoreName]::Root,
@@ -4158,8 +4196,26 @@ FLUSH PRIVILEGES;
     # If XAMPP runs IN the VM, use 127.0.0.1. If on host, use default gateway.
     $bankIp = '127.0.0.1'
     Write-Log "Mapping bank domain to $bankIp (XAMPP in-guest). If bank is on the host instead, change hosts to gateway IP $(Get-DefaultGatewayIPv4)." 'INFO'
+    # Drop retired fake domain if present from older installs
+    Remove-HostsEntry -Hostname 'midwestcommunitybank.com'
+    Remove-HostsEntry -Hostname 'www.midwestcommunitybank.com'
     Add-HostsEntry -Ip $bankIp -Hostname $persona.BankDomain
     Add-HostsEntry -Ip $bankIp -Hostname "www.$($persona.BankDomain)"
+
+    # Force SSL rebuild when domain changed (do not reuse old midwestcommunitybank.com cert)
+    $crtPath = Join-Path $x.InstallDir 'apache\conf\ssl.crt\scambait-bank.crt'
+    if ([IO.File]::Exists($crtPath)) {
+        try {
+            $raw = [IO.File]::ReadAllText($crtPath)
+            if ($raw -notmatch [regex]::Escape($persona.BankDomain)) {
+                Remove-Item -LiteralPath $crtPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (Join-Path $x.InstallDir 'apache\conf\ssl.key\scambait-bank.key') -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (Join-Path $x.InstallDir 'apache\conf\ssl.crt\scambait-bank.cer') -Force -ErrorAction SilentlyContinue
+                Write-Log 'Removed SSL cert for previous bank domain (will regenerate)' 'INFO'
+            }
+        }
+        catch {}
+    }
 
     # SSL is its own step; never let cert failure roll back PHP/DSJAS work
     try {
@@ -4187,8 +4243,9 @@ Bank:     $($persona.BankName)
 SSL cert is auto-generated and trusted in Windows Root.
 If Chrome still warns once: fully quit Chrome (tray too) and reopen.
 "@
-    if ($existing -notmatch 'web setup') {
-        ($existing.TrimEnd() + "`r`n" + $setupBlock) | Set-Content $notesPath -Encoding UTF8
+    if ($existing -notmatch 'web setup' -or $existing -match 'midwestcommunitybank') {
+        $base = [regex]::Replace($existing, '(?s)\r?\n--- web setup ---.*', '').TrimEnd()
+        ($base + "`r`n" + $setupBlock) | Set-Content $notesPath -Encoding UTF8
     }
 
     # Remove old Desktop hint if present
@@ -4332,8 +4389,19 @@ Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppD
 }
 Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
     $dir = $script:Config.Xampp.InstallDir
+    $domain = $script:Config.Persona.BankDomain
     if (-not (Test-XamppTreePresent -InstallDir $dir)) {
         throw 'XAMPP not installed - run Install XAMPP + DSJAS first'
+    }
+    Remove-HostsEntry -Hostname 'midwestcommunitybank.com'
+    Remove-HostsEntry -Hostname 'www.midwestcommunitybank.com'
+    Add-HostsEntry -Ip '127.0.0.1' -Hostname $domain
+    Add-HostsEntry -Ip '127.0.0.1' -Hostname "www.$domain"
+    $crtPath = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.crt'
+    if ([IO.File]::Exists($crtPath) -and ([IO.File]::ReadAllText($crtPath) -notmatch [regex]::Escape($domain))) {
+        Remove-Item -LiteralPath $crtPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $dir 'apache\conf\ssl.key\scambait-bank.key') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.cer') -Force -ErrorAction SilentlyContinue
     }
     # Always (re)apply PHP modules here so SSL failures never leave DSJAS broken
     Enable-XamppPhpExtensionsForDsjas -InstallDir $dir | Out-Null
