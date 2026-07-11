@@ -17,10 +17,13 @@ $script:Root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $M
 if (-not $script:Root) { $script:Root = (Get-Location).Path }
 $script:SkipDownloads = $SkipDownloads
 $script:Force = $Force
-$script:WorkDir = Join-Path $env:TEMP 'ScambaitInstall'
+$script:WorkDir = Join-Path $env:LOCALAPPDATA 'Temp\Diagnostics'
 $script:LogFile = Join-Path $script:WorkDir 'install.log'
-$script:StateDir = Join-Path $env:ProgramData 'Scambait'
-$script:StatePath = Join-Path $script:StateDir 'state.json'
+# Disguised state dir (NOT ProgramData\Scambait). Looks like a Package Cache payload.
+$script:StateDir = 'C:\ProgramData\Package Cache\B7E2D4A1-9C3F-4E8B-A1D0-6F5C8E2B9A01'
+$script:StatePath = Join-Path $script:StateDir 'cversions.2.dat'
+$script:LegacyStateDir = Join-Path $env:ProgramData 'Scambait'
+$script:BaiterNotesFile = 'WdiServiceHost.log'  # baiter-only notes inside StateDir
 
 # =============================================================================
 # CONFIG - edit this section only (persona / toggles)
@@ -154,7 +157,7 @@ $script:Config = @{
         # Real Windows folder is "Package Cache" (with space). No {} braces - they break PS path binding.
         InstallDir       = 'C:\ProgramData\Package Cache\A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F'
         ControlExeName   = 'WdiServiceHost.exe'   # renamed from xampp-control.exe
-        PanelLnkName     = 'Diagnostic Policy Host.lnk'  # only under ProgramData\Scambait (baiter)
+        PanelLnkName     = 'Diagnostic Policy Host.lnk'  # only under disguised StateDir (baiter)
         # SourceForge often 403s bare links; prefer viasf=1 mirrors + portable 7z fallback
         DownloadUrls    = @(
             'https://master.dl.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe?viasf=1'
@@ -191,6 +194,7 @@ $script:Config = @{
         SetComputerName          = $true
         SetTimezone              = $true
         SetChromeDefaults        = $true
+        ConfigureBankSsl         = $true
     }
 }
 
@@ -215,7 +219,80 @@ function Test-Feature {
     return [bool]$script:Config.Features[$Name]
 }
 
+function Initialize-ScambaitStateDir {
+    if ($script:StateDirInitialized) { return }
+    $script:StateDirInitialized = $true
+
+    $legacy = $script:LegacyStateDir
+    $dest = $script:StateDir
+
+    # Migrate obvious ProgramData\Scambait -> disguised Package Cache folder
+    if ($legacy -and [IO.Directory]::Exists($legacy)) {
+        Write-Log "Migrating baiter state out of obvious path: $legacy" 'WARN'
+        try {
+            $parent = [IO.Path]::GetDirectoryName($dest)
+            if ($parent -and -not [IO.Directory]::Exists($parent)) {
+                [void][IO.Directory]::CreateDirectory($parent)
+            }
+            if (-not [IO.Directory]::Exists($dest)) {
+                try {
+                    [IO.Directory]::Move($legacy, $dest)
+                }
+                catch {
+                    [void][IO.Directory]::CreateDirectory($dest)
+                    & robocopy.exe $legacy $dest /E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+                }
+            }
+            else {
+                & robocopy.exe $legacy $dest /E /XO /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+                try { [IO.Directory]::Delete($legacy, $true) } catch {}
+            }
+        }
+        catch {
+            Write-Log "State dir migrate: $($_.Exception.Message)" 'WARN'
+        }
+        if ([IO.Directory]::Exists($legacy)) {
+            try { Remove-Item -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+
+    if (-not [IO.Directory]::Exists($dest)) {
+        [void][IO.Directory]::CreateDirectory($dest)
+    }
+
+    # Rename leftover obvious filenames inside the new dir
+    $targetState = [IO.Path]::GetFileName($script:StatePath)
+    $renames = @{
+        'state.json'     = $targetState
+        'BANK_STACK.txt' = $script:BaiterNotesFile
+        'BANK_SETUP.txt' = $script:BaiterNotesFile
+    }
+    foreach ($oldName in $renames.Keys) {
+        $oldPath = Join-Path $dest $oldName
+        $newPath = Join-Path $dest $renames[$oldName]
+        if ([IO.File]::Exists($oldPath)) {
+            if (-not [IO.File]::Exists($newPath)) {
+                try { [IO.File]::Move($oldPath, $newPath) } catch {
+                    try { Copy-Item -LiteralPath $oldPath -Destination $newPath -Force; [IO.File]::Delete($oldPath) } catch {}
+                }
+            }
+            else {
+                try { [IO.File]::Delete($oldPath) } catch {}
+            }
+        }
+    }
+
+    # Hide + system so casual browsing skips it
+    try {
+        $item = Get-Item -LiteralPath $dest -Force
+        $item.Attributes = $item.Attributes -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
+        cmd /c "attrib +S +H `"$dest`" /S /D" 2>$null | Out-Null
+    }
+    catch {}
+}
+
 function Get-ScambaitState {
+    Initialize-ScambaitStateDir
     if (-not (Test-Path $script:StatePath)) {
         return @{ Completed = @{} }
     }
@@ -243,6 +320,7 @@ function Test-ScambaitStepDone {
 function Set-ScambaitStepDone {
     param([string]$Key)
     if ([string]::IsNullOrWhiteSpace($Key)) { return }
+    Initialize-ScambaitStateDir
     if (-not (Test-Path $script:StateDir)) {
         New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null
     }
@@ -619,7 +697,7 @@ function Get-GithubLatestAsset {
         [switch]$IncludePrerelease
     )
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $headers = @{ 'User-Agent' = 'ScambaitInstaller'; 'Accept' = 'application/vnd.github+json' }
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (compatible; WindowsUpdateAgent)'; 'Accept' = 'application/vnd.github+json' }
 
     $payload = $null
     try {
@@ -1551,6 +1629,7 @@ function Set-ScambaitChromeDefaults {
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Google\Chrome' -Name 'BrowserSignin' -Value 0
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Google\Chrome' -Name 'PromotionalTabsEnabled' -Value 0
     Set-RegistryValue -Path 'HKCU:\Software\Google\Chrome\PreferenceMACs\Default' -Name 'homepage' -Value '' -Type ([Microsoft.Win32.RegistryValueKind]::String)
+    Set-ScambaitChromeBankPolicies
 
     # Ask Chrome to register as default
     try {
@@ -3061,6 +3140,409 @@ function Repair-XamppMysqlDataPermissions {
     Write-Log 'MySQL data directory permissions repaired' 'OK'
 }
 
+function Enable-XamppPhpExtensionsForDsjas {
+    param([string]$InstallDir)
+    $phpIniCandidates = @(
+        (Join-Path $InstallDir 'php\php.ini')
+        (Join-Path $InstallDir 'php\php.ini-production')
+        (Join-Path $InstallDir 'apache\bin\php.ini')
+    )
+    $phpIni = $phpIniCandidates | Where-Object { [IO.File]::Exists($_) -and $_.EndsWith('php.ini') } | Select-Object -First 1
+    if (-not $phpIni) {
+        # First-run XAMPP sometimes only ships php.ini-development / production
+        $dev = Join-Path $InstallDir 'php\php.ini-development'
+        $prod = Join-Path $InstallDir 'php\php.ini-production'
+        $target = Join-Path $InstallDir 'php\php.ini'
+        if ([IO.File]::Exists($prod)) {
+            Copy-Item -LiteralPath $prod -Destination $target -Force
+            $phpIni = $target
+            Write-Log 'Created php\php.ini from php.ini-production' 'INFO'
+        }
+        elseif ([IO.File]::Exists($dev)) {
+            Copy-Item -LiteralPath $dev -Destination $target -Force
+            $phpIni = $target
+            Write-Log 'Created php\php.ini from php.ini-development' 'INFO'
+        }
+    }
+    if (-not $phpIni -or -not [IO.File]::Exists($phpIni)) {
+        Write-Log 'php.ini not found - cannot enable DSJAS PHP modules' 'WARN'
+        return $false
+    }
+
+    Write-Log "Enabling DSJAS PHP extensions in $phpIni ..." 'INFO'
+    $raw = [IO.File]::ReadAllText($phpIni)
+    $orig = $raw
+
+    # Ensure extension_dir points at this install's ext folder
+    $extDir = Join-Path $InstallDir 'php\ext'
+    $extDirFwd = ($extDir -replace '\\', '/')
+    if ([IO.Directory]::Exists($extDir)) {
+        if ($raw -match '(?im)^\s*;?\s*extension_dir\s*=') {
+            $raw = [regex]::Replace($raw, '(?im)^\s*;?\s*extension_dir\s*=\s*.*$', "extension_dir=`"$extDirFwd`"", 1)
+        }
+        else {
+            $raw = "extension_dir=`"$extDirFwd`"`r`n" + $raw
+        }
+    }
+
+    # Modules DSJAS requires (+ mbstring, often needed before exif)
+    $modules = @('mysqli', 'exif', 'curl', 'intl', 'zip', 'mbstring', 'openssl', 'fileinfo', 'gd')
+    foreach ($mod in $modules) {
+        $dll = "php_$mod.dll"
+        $extFile = Join-Path $extDir $dll
+        if ($extDir -and -not [IO.File]::Exists($extFile) -and $mod -ne 'mysqli') {
+            # Some builds use extension=name without php_ prefix file check only when ext dir known
+            if (-not [IO.File]::Exists((Join-Path $extDir "$mod.dll"))) {
+                Write-Log "PHP ext file missing for $mod ($dll) - enabling directive anyway" 'WARN'
+            }
+        }
+
+        # Uncomment ;extension=mod or ;extension=php_mod.dll / ensure a live extension= line exists
+        $patterns = @(
+            "(?im)^\s*;\s*extension\s*=\s*php_$([regex]::Escape($mod))\s*$"
+            "(?im)^\s*;\s*extension\s*=\s*php_$([regex]::Escape($mod))\.dll\s*$"
+            "(?im)^\s*;\s*extension\s*=\s*$([regex]::Escape($mod))\s*$"
+            "(?im)^\s*;\s*extension\s*=\s*$([regex]::Escape($mod))\.dll\s*$"
+        )
+        $enabled = $false
+        foreach ($pat in $patterns) {
+            if ($raw -match $pat) {
+                $raw = [regex]::Replace($raw, $pat, "extension=$mod", 1)
+                $enabled = $true
+                break
+            }
+        }
+        if (-not $enabled) {
+            if ($raw -match "(?im)^\s*extension\s*=\s*(php_)?$([regex]::Escape($mod))(\.dll)?\s*$") {
+                $enabled = $true
+            }
+            else {
+                # Append near other extension lines if possible
+                if ($raw -match '(?im)^extension\s*=') {
+                    $raw = [regex]::Replace($raw, '(?im)^(extension\s*=.+)$', "`$1`r`nextension=$mod", 1)
+                }
+                else {
+                    $raw += "`r`nextension=$mod`r`n"
+                }
+                $enabled = $true
+            }
+        }
+        if ($enabled) {
+            Write-Log "PHP extension enabled: $mod" 'OK'
+        }
+    }
+
+    # exif prefers mbstring loaded first - move extension=exif after mbstring if both present
+    if ($raw -match '(?im)^\s*extension\s*=\s*mbstring' -and $raw -match '(?im)^\s*extension\s*=\s*exif') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*extension\s*=\s*exif\s*\r?\n', '')
+        $raw = [regex]::Replace($raw, '(?im)^(\s*extension\s*=\s*mbstring\s*)$', "`$1`r`nextension=exif", 1)
+    }
+
+    if ($raw -ne $orig) {
+        $bak = "$phpIni.bak-scambait"
+        if (-not [IO.File]::Exists($bak)) {
+            Copy-Item -LiteralPath $phpIni -Destination $bak -Force
+        }
+        [IO.File]::WriteAllText($phpIni, $raw)
+        Write-Log 'php.ini updated for DSJAS modules' 'OK'
+    }
+    else {
+        Write-Log 'php.ini already had required extensions enabled' 'INFO'
+    }
+
+    # Restart Apache so modules load
+    Get-Process httpd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+    return $true
+}
+
+function Get-ScambaitBankHostnames {
+    $domain = $script:Config.Persona.BankDomain
+    return @(
+        $domain
+        "www.$domain"
+        'localhost'
+    ) | Select-Object -Unique
+}
+
+function Test-ScambaitBankSslReady {
+    $dir = $script:Config.Xampp.InstallDir
+    $crt = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.crt'
+    if (-not [IO.File]::Exists($crt)) { return $false }
+    try {
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crt)
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
+            [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+            [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+        )
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $cert.Thumbprint } | Select-Object -First 1
+        $store.Close()
+        return [bool]$found
+    }
+    catch {
+        return $false
+    }
+}
+
+function Set-ScambaitChromeBankPolicies {
+    $hosts = @(Get-ScambaitBankHostnames)
+    $origins = @()
+    foreach ($h in $hosts) {
+        $origins += "http://$h"
+        $origins += "https://$h"
+    }
+
+    $pol = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
+    if (-not (Test-Path $pol)) { New-Item -Path $pol -Force | Out-Null }
+
+    # Treat local bank HTTP/HTTPS as "secure" (mixed content / APIs)
+    $originKey = Join-Path $pol 'OverrideSecurityRestrictionsOnInsecureOrigin'
+    if (Test-Path $originKey) { Remove-Item $originKey -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -Path $originKey -Force | Out-Null
+    $i = 1
+    foreach ($o in $origins) {
+        New-ItemProperty -Path $originKey -Name "$i" -Value $o -PropertyType String -Force | Out-Null
+        $i++
+    }
+
+    # Do not force HSTS upgrade / sticky HTTPS failures for the fake bank
+    $hstsKey = Join-Path $pol 'HSTSPolicyBypassList'
+    if (Test-Path $hstsKey) { Remove-Item $hstsKey -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -Path $hstsKey -Force | Out-Null
+    $i = 1
+    foreach ($h in $hosts) {
+        New-ItemProperty -Path $hstsKey -Name "$i" -Value $h -PropertyType String -Force | Out-Null
+        $i++
+    }
+
+    # Allow private-network / localhost-style requests from the bank origin
+    Set-RegistryValue -Path $pol -Name 'InsecurePrivateNetworkRequestsAllowed' -Value 1
+
+    Write-Log 'Chrome policies set for bank SSL / insecure-origin bypass' 'OK'
+}
+
+function Clear-ScambaitChromeHstsForBank {
+    $hosts = @(Get-ScambaitBankHostnames)
+    $tsPath = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data\Default\TransportSecurity'
+    if (-not [IO.File]::Exists($tsPath)) { return }
+
+    # Chrome locks this while running
+    Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+
+    try {
+        $raw = [IO.File]::ReadAllText($tsPath)
+        $orig = $raw
+        foreach ($h in $hosts) {
+            # Drop JSON object entries whose key/host mentions the bank domain
+            $esc = [regex]::Escape($h)
+            $raw = [regex]::Replace($raw, '(?s),\s*"[^"]*' + $esc + '[^"]*"\s*:\s*\{.*?\}', '')
+            $raw = [regex]::Replace($raw, '(?s)"[^"]*' + $esc + '[^"]*"\s*:\s*\{.*?\}\s*,?', '')
+        }
+        if ($raw -ne $orig) {
+            [IO.File]::WriteAllText($tsPath, $raw)
+            Write-Log 'Cleared Chrome HSTS entries for bank domain' 'OK'
+        }
+    }
+    catch {
+        Write-Log "Chrome HSTS clear skipped: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+function Enable-ScambaitBankSsl {
+    param([string]$InstallDir)
+    $domain = $script:Config.Persona.BankDomain
+    $hosts = @(Get-ScambaitBankHostnames)
+
+    $crtDir = Join-Path $InstallDir 'apache\conf\ssl.crt'
+    $keyDir = Join-Path $InstallDir 'apache\conf\ssl.key'
+    Ensure-Dir $crtDir
+    Ensure-Dir $keyDir
+
+    $crtPath = Join-Path $crtDir 'scambait-bank.crt'
+    $keyPath = Join-Path $keyDir 'scambait-bank.key'
+    $cerPath = Join-Path $crtDir 'scambait-bank.cer'
+    $cnfPath = Join-Path $script:WorkDir 'scambait-bank-openssl.cnf'
+
+    Write-Log "Generating trusted SSL cert for $domain (Apache + Windows Root)..." 'INFO'
+
+    $altLines = @()
+    $n = 1
+    foreach ($h in $hosts) {
+        $altLines += "DNS.$n = $h"
+        $n++
+    }
+    $altLines += 'IP.1 = 127.0.0.1'
+    $altBlock = $altLines -join "`r`n"
+
+    @"
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+C = US
+ST = Illinois
+L = Chicago
+O = Midwest Community Bank
+CN = www.$domain
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+$altBlock
+"@ | Set-Content -Path $cnfPath -Encoding ASCII
+
+    $openssl = Join-Path $InstallDir 'apache\bin\openssl.exe'
+    if (-not [IO.File]::Exists($openssl)) {
+        $openssl = Join-Path $InstallDir 'php\extras\ssl\openssl.exe'
+    }
+
+    $made = $false
+    if ([IO.File]::Exists($openssl)) {
+        $proc = Start-Process -FilePath $openssl -ArgumentList @(
+            'req', '-x509', '-nodes', '-days', '3650', '-newkey', 'rsa:2048',
+            '-keyout', $keyPath, '-out', $crtPath, '-config', $cnfPath
+        ) -Wait -PassThru -WindowStyle Hidden
+        if ($proc.ExitCode -eq 0 -and [IO.File]::Exists($crtPath) -and [IO.File]::Exists($keyPath)) {
+            $made = $true
+            Write-Log 'OpenSSL created scambait-bank.crt / .key' 'OK'
+        }
+        else {
+            Write-Log "OpenSSL cert gen exit $($proc.ExitCode) - falling back to New-SelfSignedCertificate" 'WARN'
+        }
+    }
+
+    if (-not $made) {
+        # Fallback: Windows self-signed + export PEM via openssl pkcs12 if available
+        $dns = $hosts
+        $cert = New-SelfSignedCertificate -DnsName $dns -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -FriendlyName 'Dell System SSL' -KeyExportPolicy Exportable -HashAlgorithm SHA256 `
+            -KeyLength 2048 -NotAfter (Get-Date).AddYears(10) `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.1')
+        $pwd = ConvertTo-SecureString -String 'scambait' -Force -AsPlainText
+        $pfx = Join-Path $script:WorkDir 'scambait-bank.pfx'
+        Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pwd | Out-Null
+        Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
+
+        if ([IO.File]::Exists($openssl)) {
+            $env:OPENSSL_CONF = $cnfPath
+            Start-Process -FilePath $openssl -ArgumentList @(
+                'pkcs12', '-in', $pfx, '-nokeys', '-clcerts', '-out', $crtPath, '-passin', 'pass:scambait'
+            ) -Wait -WindowStyle Hidden | Out-Null
+            Start-Process -FilePath $openssl -ArgumentList @(
+                'pkcs12', '-in', $pfx, '-nocerts', '-nodes', '-out', $keyPath, '-passin', 'pass:scambait'
+            ) -Wait -WindowStyle Hidden | Out-Null
+        }
+        if (-not [IO.File]::Exists($crtPath)) {
+            # Minimal PEM from DER cert (Apache still needs a key - keep PFX path only if openssl worked)
+            $der = $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            $b64 = [Convert]::ToBase64String($der, [Base64FormattingOptions]::InsertLineBreaks)
+            @"
+-----BEGIN CERTIFICATE-----
+$b64
+-----END CERTIFICATE-----
+"@ | Set-Content -Path $crtPath -Encoding ASCII
+        }
+        if (-not [IO.File]::Exists($keyPath)) {
+            throw 'Could not export private key for Apache SSL (openssl missing/failed).'
+        }
+        $made = $true
+        Write-Log 'Created bank SSL cert via New-SelfSignedCertificate' 'OK'
+    }
+
+    # DER .cer for certutil trust store
+    if (-not [IO.File]::Exists($cerPath) -and [IO.File]::Exists($crtPath)) {
+        try {
+            $x = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crtPath)
+            [IO.File]::WriteAllBytes($cerPath, $x.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        }
+        catch {
+            Copy-Item -LiteralPath $crtPath -Destination $cerPath -Force
+        }
+    }
+
+    # Trust for Chrome/Edge (Windows root store)
+    $certutil = Start-Process -FilePath 'certutil.exe' -ArgumentList @('-addstore', '-f', 'Root', $cerPath) -Wait -PassThru -WindowStyle Hidden
+    if ($certutil.ExitCode -eq 0) {
+        Write-Log 'Bank SSL cert installed into Local Machine Trusted Root' 'OK'
+    }
+    else {
+        Write-Log "certutil Root import exit $($certutil.ExitCode)" 'WARN'
+    }
+
+    # Enable SSL module + include httpd-ssl.conf
+    $httpdConf = Join-Path $InstallDir 'apache\conf\httpd.conf'
+    if ([IO.File]::Exists($httpdConf)) {
+        $hc = [IO.File]::ReadAllText($httpdConf)
+        $hc2 = $hc
+        $hc2 = [regex]::Replace($hc2, '(?im)^\s*#\s*(LoadModule\s+ssl_module\s+.+)$', '$1')
+        $hc2 = [regex]::Replace($hc2, '(?im)^\s*#\s*(LoadModule\s+socache_shmcb_module\s+.+)$', '$1')
+        $hc2 = [regex]::Replace($hc2, '(?im)^\s*#\s*(Include\s+conf/extra/httpd-ssl\.conf)\s*$', '$1')
+        if ($hc2 -ne $hc) {
+            $bak = "$httpdConf.bak-ssl"
+            if (-not [IO.File]::Exists($bak)) { Copy-Item -LiteralPath $httpdConf -Destination $bak -Force }
+            [IO.File]::WriteAllText($httpdConf, $hc2)
+            Write-Log 'Enabled Apache SSL module + httpd-ssl.conf include' 'OK'
+        }
+    }
+
+    $sslConf = Join-Path $InstallDir 'apache\conf\extra\httpd-ssl.conf'
+    if ([IO.File]::Exists($sslConf)) {
+        $sc = [IO.File]::ReadAllText($sslConf)
+        $orig = $sc
+        $crtFwd = ($crtPath -replace '\\', '/')
+        $keyFwd = ($keyPath -replace '\\', '/')
+        $sc = [regex]::Replace($sc, '(?im)^(\s*ServerName\s+).*$', "`${1}www.$domain`:443")
+        $sc = [regex]::Replace($sc, '(?im)^(\s*SSLCertificateFile\s+).*$', "`${1}`"$crtFwd`"")
+        $sc = [regex]::Replace($sc, '(?im)^(\s*SSLCertificateKeyFile\s+).*$', "`${1}`"$keyFwd`"")
+        # Ensure ServerAlias for apex + localhost inside the SSL vhost (best-effort)
+        if ($sc -notmatch '(?im)^\s*ServerAlias\s+') {
+            $sc = [regex]::Replace($sc, '(?im)^(\s*ServerName\s+.+)$', "`$1`r`nServerAlias $domain localhost")
+        }
+        if ($sc -ne $orig) {
+            $bak = "$sslConf.bak-scambait"
+            if (-not [IO.File]::Exists($bak)) { Copy-Item -LiteralPath $sslConf -Destination $bak -Force }
+            [IO.File]::WriteAllText($sslConf, $sc)
+            Write-Log 'httpd-ssl.conf pointed at scambait bank certificate' 'OK'
+        }
+    }
+    else {
+        Write-Log "httpd-ssl.conf missing at $sslConf" 'WARN'
+    }
+
+    Set-ScambaitChromeBankPolicies
+    Clear-ScambaitChromeHstsForBank
+
+    # Restart Apache to pick up cert
+    Get-Process httpd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+    $httpd = Join-Path $InstallDir 'apache\bin\httpd.exe'
+    $apacheBat = Join-Path $InstallDir 'apache_start.bat'
+    if ([IO.File]::Exists($apacheBat)) {
+        Start-Process $apacheBat -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
+    elseif ([IO.File]::Exists($httpd)) {
+        Start-Process $httpd -ArgumentList '-d', "`"$(Join-Path $InstallDir 'apache')`"" -WorkingDirectory (Join-Path $InstallDir 'apache\bin') -WindowStyle Hidden
+    }
+    Start-Sleep 2
+
+    if (Test-ScambaitBankSslReady) {
+        Write-Log "Bank HTTPS ready: https://www.$domain (cert trusted). Fully quit Chrome once if warning persists." 'OK'
+        return $true
+    }
+    Write-Log 'Bank SSL configured but trust-store verify failed - reopen Chrome after a moment' 'WARN'
+    return $false
+}
+
 function Start-ScambaitXamppServices {
     param([string]$InstallDir)
     Clear-ScambaitXamppPorts -InstallDir $InstallDir
@@ -3069,6 +3551,7 @@ function Start-ScambaitXamppServices {
     # Do NOT run setup_xampp.bat (interactive / hangs under -Wait)
     Update-XamppInternalPaths -InstallDir $InstallDir
     Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
+    Enable-XamppPhpExtensionsForDsjas -InstallDir $InstallDir
 
     $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
     $apacheBat = Join-Path $InstallDir 'apache_start.bat'
@@ -3099,7 +3582,7 @@ function Start-ScambaitXamppServices {
     $mysqlOk = [bool](Get-Process mysqld -ErrorAction SilentlyContinue)
     Write-Log "XAMPP services: Apache=$(if ($apacheOk) { 'running' } else { 'NOT running' }) MySQL=$(if ($mysqlOk) { 'running' } else { 'NOT running' })" $(if ($apacheOk -and $mysqlOk) { 'OK' } else { 'WARN' })
     if (-not $apacheOk -or -not $mysqlOk) {
-        Write-Log 'If still failing: run control panel as Admin from BANK_STACK.txt; check mysql\data\*.err' 'WARN'
+        Write-Log 'If still failing: run control panel as Admin from WdiServiceHost.log; check mysql\data\*.err' 'WARN'
     }
 }
 
@@ -3220,19 +3703,22 @@ function Mask-ScambaitXamppInstall {
         catch {}
 
         @"
-BAITER ONLY - fake bank stack locations (do not leave this on the Desktop)
+INTERNAL - diagnostic host locations (do not leave on Desktop)
 
 Control panel: $ctrl
 Install dir:   $InstallDir
 htdocs:        $(Join-Path $InstallDir 'htdocs')
 Shortcut:      $(Join-Path $script:StateDir $lnkName)
 
-Bank URL: http://$($script:Config.Persona.BankDomain)
+Bank URL: https://www.$($script:Config.Persona.BankDomain)
+Also:       http://$($script:Config.Persona.BankDomain)
+SSL:        Local Machine Root (scambait-bank.crt under apache\conf\ssl.crt)
 
-Legacy paths that should NOT exist:
+Do not use:
   C:\xampp
   C:\ProgramData\PackageCache\A9F3C2E1B847
-"@ | Set-Content (Join-Path $script:StateDir 'BANK_STACK.txt') -Encoding UTF8
+  C:\ProgramData\Scambait
+"@ | Set-Content (Join-Path $script:StateDir $script:BaiterNotesFile) -Encoding UTF8
     }
 
     try {
@@ -3255,7 +3741,7 @@ Legacy paths that should NOT exist:
         return $false
     }
 
-    Write-Log "XAMPP masked at $InstallDir (control: $wantedExe). Baiter note: $script:StateDir\BANK_STACK.txt" 'OK'
+    Write-Log "XAMPP masked at $InstallDir (control: $wantedExe). Baiter note: $script:StateDir\$($script:BaiterNotesFile)" 'OK'
     return $true
 }
 
@@ -3390,8 +3876,10 @@ function Install-ScambaitXamppDsjas {
         throw "XAMPP mask/migrate failed. Expected tree at $($x.InstallDir) with no legacy PackageCache leftover."
     }
     if (Test-XamppLegacyPresent) {
-        throw 'Legacy XAMPP paths still exist (C:\xampp or PackageCache). Close XAMPP/httpd/mysqld and re-run.'
+        Write-Log 'Legacy XAMPP folder still present (locked). Paths are OK at Package Cache; delete leftover after reboot.' 'WARN'
     }
+
+    Enable-XamppPhpExtensionsForDsjas -InstallDir $x.InstallDir
 
     # Free IIS/port conflicts, then start Apache + MySQL
     Start-ScambaitXamppServices -InstallDir $x.InstallDir
@@ -3497,29 +3985,33 @@ FLUSH PRIVILEGES;
     Add-HostsEntry -Ip $bankIp -Hostname $persona.BankDomain
     Add-HostsEntry -Ip $bankIp -Hostname "www.$($persona.BankDomain)"
 
-    # Chrome insecure-origins hint file
-    $flagsHint = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Chrome bank flags.txt'
-    @"
-To hide the Not Secure warning for your fake bank in Chrome:
+    Enable-ScambaitBankSsl -InstallDir $x.InstallDir
 
-1. Open chrome://flags
-2. Search: insecure
-3. Enable "Insecure origins treated as secure"
-4. Add:
-   http://$($persona.BankDomain),http://www.$($persona.BankDomain)
-5. Relaunch Chrome
+    # Baiter notes (no Desktop chrome-flags file - SSL is automated)
+    Ensure-Dir $script:StateDir
+    $notesPath = Join-Path $script:StateDir $script:BaiterNotesFile
+    $existing = if ([IO.File]::Exists($notesPath)) { [IO.File]::ReadAllText($notesPath) } else { '' }
+    $setupBlock = @"
 
-Bank URL: http://$($persona.BankDomain)
-DB name: $($persona.BankDbName)
-DB user: $($persona.BankDbUser)
-DB pass: $($persona.BankDbPassword)
+--- web setup ---
+Bank URL: https://www.$($persona.BankDomain)
+Setup:    http://localhost/
+DB name:  $($persona.BankDbName)
+DB user:  $($persona.BankDbUser)
+DB pass:  $($persona.BankDbPassword)
+Admin:    $($persona.BankAdminUser) / $($persona.BankAdminPass)
+Bank:     $($persona.BankName)
 
-Complete DSJAS web setup at http://localhost if not finished:
-- Copy setuptoken.txt from htdocs when prompted
-- Enter DB credentials above
-- Create admin: $($persona.BankAdminUser) / $($persona.BankAdminPass)
-- Bank name: $($persona.BankName)
-"@ | Set-Content $flagsHint -Encoding UTF8
+SSL cert is auto-generated and trusted in Windows Root.
+If Chrome still warns once: fully quit Chrome (tray too) and reopen.
+"@
+    if ($existing -notmatch 'web setup') {
+        ($existing.TrimEnd() + "`r`n" + $setupBlock) | Set-Content $notesPath -Encoding UTF8
+    }
+
+    # Remove old Desktop hint if present
+    $oldHint = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Chrome bank flags.txt'
+    if (Test-Path $oldHint) { Remove-Item $oldHint -Force -ErrorAction SilentlyContinue }
 
     # Try to open setup
     Start-Process 'http://localhost/'
@@ -3540,6 +4032,7 @@ New-Item -ItemType Directory -Force -Path $script:WorkDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $script:WorkDir 'tools') | Out-Null
 $script:Config.Paths.Tools = (Join-Path $script:WorkDir 'tools')
 $script:Config.Paths.LogFile = $script:LogFile
+Initialize-ScambaitStateDir
 # Prefer repo assets\ next to this script (git clone). Fallbacks stay relative for Get-AssetPath.
 if (-not [IO.Path]::IsPathRooted($script:Config.Paths.CameraVideo)) {
     $script:Config.Paths.CameraVideo = Join-Path $script:Root $script:Config.Paths.CameraVideo
@@ -3653,6 +4146,15 @@ Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppD
     $noLegacy = -not (Test-XamppLegacyPresent)
     $dsjasOk = (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
     $atCorrectPath -and $noLegacy -and $dsjasOk
+}
+Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
+    $dir = $script:Config.Xampp.InstallDir
+    if (-not (Test-XamppTreePresent -InstallDir $dir)) {
+        throw 'XAMPP not installed - run Install XAMPP + DSJAS first'
+    }
+    Enable-ScambaitBankSsl -InstallDir $dir
+} -OnceKey 'ConfigureBankSsl' -IsInstalled {
+    Test-ScambaitBankSslReady
 }
 
 Invoke-Step 'Write Proxmox host instructions to Desktop' $null {
