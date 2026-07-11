@@ -98,14 +98,13 @@ $script:Config = @{
     }
 
     # Programs a 62-year-old Chicago retiree (or his kids) would plausibly install
-    # Optional DownloadUrl = direct installer when winget has no package (e.g. Skype)
+    # Optional DownloadUrl = direct installer when winget hash/package is unreliable
     WingetPackages = @(
         @{ Id = 'Google.Chrome'; Name = 'Google Chrome' }
         @{ Id = 'Adobe.Acrobat.Reader.64-bit'; Name = 'Adobe Acrobat Reader' }
         @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player' }
         @{ Id = 'RARLab.WinRAR'; Name = 'WinRAR' }
         @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
-        @{ Id = 'Microsoft.Skype'; Name = 'Skype' }
         @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner'; DownloadUrl = 'https://download.ccleaner.com/ccsetup.exe'; InstallerName = 'ccsetup.exe'; SilentArgs = '/S' }
         @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes' }
         @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice' }
@@ -270,7 +269,6 @@ function Test-WingetPackageInstalled {
             'VideoLAN\.VLC' { return (Test-Path "${env:ProgramFiles}\VideoLAN\VLC\vlc.exe") -or (Test-Path "${env:ProgramFiles(x86)}\VideoLAN\VLC\vlc.exe") }
             'Adobe\.Acrobat' { return (Test-Path "${env:ProgramFiles}\Adobe\Acrobat DC\Acrobat\Acrobat.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe") }
             'Zoom\.Zoom' { return Test-Path "${env:ProgramFiles}\Zoom\bin\Zoom.exe" }
-            'Skype|Microsoft\.Skype' { return (Test-Path "${env:ProgramFiles}\Microsoft\Skype for Desktop\Skype.exe") -or (Test-Path "${env:LOCALAPPDATA}\Microsoft\Skype for Desktop\Skype.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Microsoft\Skype for Desktop\Skype.exe") }
             'RARLab\.WinRAR|WinRAR' { return (Test-Path "${env:ProgramFiles}\WinRAR\WinRAR.exe") -or (Test-Path "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe") }
             'Piriform\.CCleaner' { return Test-Path "${env:ProgramFiles}\CCleaner\CCleaner.exe" }
             'Malwarebytes' { return Test-Path "${env:ProgramFiles}\Malwarebytes\Anti-Malware\MBAMService.exe" }
@@ -1452,7 +1450,7 @@ function Install-ScambaitPrograms {
             continue
         }
 
-        # Direct download path (Skype etc. - no reliable winget package)
+        # Direct download path when winget is unreliable
         if ($pkg.DownloadUrl) {
             Write-Log "Installing $($pkg.Name) via direct download..." 'INFO'
             $tools = Get-AssetPath $script:Config.Paths.Tools
@@ -1463,8 +1461,7 @@ function Install-ScambaitPrograms {
                 if ($script:Force -or -not (Test-Path $installer)) {
                     Download-File -Url $pkg.DownloadUrl -OutFile $installer
                 }
-                $args = if ($pkg.SilentArgs) { $pkg.SilentArgs } else { '/APPDATA=1 /VERYSILENT /NORESTART /NOLAUNCH' }
-                # Skype installer uses /VERYSILENT; fall back to plain run if that fails
+                $args = if ($pkg.SilentArgs) { $pkg.SilentArgs } else { '/S' }
                 $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru -ErrorAction SilentlyContinue
                 if (-not $p -or $p.ExitCode -notin 0, 3010) {
                     Write-Log "Silent install exit odd for $($pkg.Name); trying /S ..." 'WARN'
