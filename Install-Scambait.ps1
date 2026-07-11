@@ -2994,28 +2994,38 @@ function Update-XamppInternalPaths {
 
 function Move-XamppTree {
     param([string]$Source, [string]$Dest)
-    $parent = [IO.Path]::GetDirectoryName($Dest.TrimEnd('\', '/'))
+    # Avoid String.TrimEnd('\','/') - PS 5.1 method binder throws "Parameter set cannot be resolved"
+    $destNorm = $Dest.Trim().TrimEnd([char]0x5C).TrimEnd([char]0x2F)
+    $parent = [IO.Path]::GetDirectoryName($destNorm)
     if ($parent) { Ensure-Dir $parent }
-    if (Test-Path -LiteralPath $Dest) {
-        Remove-XamppTreeForce -Dir $Dest -Reason 'replace before migrate'
+
+    if ([IO.Directory]::Exists($destNorm)) {
+        Remove-XamppTreeForce -Dir $destNorm -Reason 'replace before migrate'
     }
-    Write-Log "Migrating XAMPP: $Source -> $Dest" 'INFO'
+
+    Write-Log "Migrating XAMPP: $Source -> $destNorm" 'INFO'
+    $moved = $false
     try {
-        Move-Item -LiteralPath $Source -Destination $Dest -Force -ErrorAction Stop
+        [IO.Directory]::Move($Source, $destNorm)
+        $moved = $true
     }
     catch {
-        Write-Log "Move-Item failed ($($_.Exception.Message)); copying then deleting source..." 'WARN'
-        New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-        & robocopy.exe $Source $Dest /E /COPY:DAT /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
-        if (-not (Test-XamppDirHasTree -Dir $Dest)) {
-            Copy-Item -Path (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
+        Write-Log "Directory.Move failed ($($_.Exception.Message)); using robocopy..." 'WARN'
+        if (-not [IO.Directory]::Exists($destNorm)) {
+            [void][IO.Directory]::CreateDirectory($destNorm)
         }
-        Remove-XamppTreeForce -Dir $Source -Reason 'after copy-migrate'
+        & robocopy.exe $Source $destNorm /E /COPY:DAT /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+        if (Test-XamppDirHasTree -Dir $destNorm) {
+            Remove-XamppTreeForce -Dir $Source -Reason 'after copy-migrate'
+            $moved = $true
+        }
     }
-    if (-not (Test-XamppDirHasTree -Dir $Dest)) {
-        throw "XAMPP migrate failed - tree not present at $Dest"
+
+    if (-not $moved -or -not (Test-XamppDirHasTree -Dir $destNorm)) {
+        throw "XAMPP migrate failed - tree not present at $destNorm"
     }
-    Update-XamppInternalPaths -InstallDir $Dest -OldRoots @(
+
+    Update-XamppInternalPaths -InstallDir $destNorm -OldRoots @(
         $Source
         ($Source -replace '\\', '/')
         'C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp'
