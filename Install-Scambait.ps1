@@ -634,15 +634,31 @@ function Get-DefaultGatewayIPv4 {
 
 function Add-HostsEntry {
     param([string]$Ip, [string]$Hostname)
-    $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
-    $content = Get-Content $hosts -ErrorAction SilentlyContinue
-    $pattern = "^\s*$([regex]::Escape($Ip))\s+$([regex]::Escape($Hostname))\s*$"
-    if ($content | Where-Object { $_ -match $pattern }) {
+    $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+    if (-not (Test-Path $hostsPath)) {
+        throw "Hosts file missing: $hostsPath"
+    }
+
+    $lines = @(Get-Content $hostsPath -ErrorAction Stop)
+    $hostPattern = "^\s*\d{1,3}(\.\d{1,3}){3}\s+$([regex]::Escape($Hostname))(\s|#|$)"
+    $exactPattern = "^\s*$([regex]::Escape($Ip))\s+$([regex]::Escape($Hostname))(\s|#|$)"
+    $hadOther = [bool]($lines | Where-Object { $_ -match $hostPattern -and $_ -notmatch $exactPattern })
+    $hasExact = [bool]($lines | Where-Object { $_ -match $exactPattern })
+
+    if ($hasExact -and -not $hadOther) {
         Write-Log "Hosts already has $Hostname -> $Ip" 'INFO'
         return
     }
-    Add-Content -Path $hosts -Value "`r`n$Ip`t$Hostname" -Encoding ASCII
-    Write-Log "Hosts: $Hostname -> $Ip" 'OK'
+
+    $kept = @($lines | Where-Object { $_ -notmatch $hostPattern })
+    while ($kept.Count -gt 0 -and [string]::IsNullOrWhiteSpace($kept[-1])) {
+        if ($kept.Count -eq 1) { $kept = @(); break }
+        $kept = @($kept[0..($kept.Count - 2)])
+    }
+    $kept += "$Ip`t$Hostname"
+    Set-Content -Path $hostsPath -Value $kept -Encoding ASCII -Force
+    Write-Log "Hosts: $Hostname -> $Ip$(if ($hadOther) { ' (replaced prior mapping)' })" 'OK'
+    try { & ipconfig /flushdns | Out-Null } catch {}
 }
 #endregion
 
