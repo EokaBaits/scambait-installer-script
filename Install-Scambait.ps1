@@ -100,20 +100,20 @@ $script:Config = @{
         )
     }
 
+    # Programs a 62-year-old Chicago retiree (or his kids) would plausibly install
     WingetPackages = @(
         @{ Id = 'Google.Chrome'; Name = 'Google Chrome' }
-        @{ Id = 'Mozilla.Firefox'; Name = 'Mozilla Firefox' }
         @{ Id = 'Adobe.Acrobat.Reader.64-bit'; Name = 'Adobe Acrobat Reader' }
         @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player' }
-        @{ Id = '7zip.7zip'; Name = '7-Zip' }
-        @{ Id = 'Notepad++.Notepad++'; Name = 'Notepad++' }
-        @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
-        @{ Id = 'Discord.Discord'; Name = 'Discord' }
-        @{ Id = 'Spotify.Spotify'; Name = 'Spotify' }
         @{ Id = 'WinRAR.WinRAR'; Name = 'WinRAR' }
-        @{ Id = 'Oracle.JavaRuntimeEnvironment'; Name = 'Java Runtime' }
-        @{ Id = 'CPUID.CPU-Z'; Name = 'CPU-Z' }
+        @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
+        @{ Id = 'Microsoft.Skype'; Name = 'Skype' }
         @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner' }
+        @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes' }
+        @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice' }
+        @{ Id = 'Dropbox.Dropbox'; Name = 'Dropbox' }
+        @{ Id = 'Google.GoogleDrive'; Name = 'Google Drive' }
+        @{ Id = 'Amazon.Kindle'; Name = 'Kindle' }
     )
 
     SkipWingetIds = @()
@@ -170,6 +170,7 @@ $script:Config = @{
         SetupCameraLoop          = $true
         InstallPrograms          = $true
         SeedChromeHistory        = $true
+        SeedDownloads            = $true
         GeneratePersonalFiles    = $true
         CopyWallpapers           = $true
         SyncGitHubAssets         = $true
@@ -967,10 +968,155 @@ function Install-ScambaitPrograms {
 
 
 #region Seed-ChromeHistory
-function Seed-ScambaitChromeHistory {
-    Write-Log 'Seeding believable Chrome history...' 'INFO'
+function Get-PersonaChromeUrls {
+    $p = $script:Config.Persona
+    $city = if ($p.City) { $p.City } else { 'Chicago' }
+    $state = if ($p.State) { $p.State } else { 'IL' }
+    $zip = if ($p.Zip) { $p.Zip } else { '60636' }
+    $first = $p.FirstName
+    $last = $p.LastName
+    $full = $p.FullName
+    $nick = if ($p.Nickname) { $p.Nickname } else { $first }
+    $email = $p.Email
+    $bank = $p.BankDomain
+    $bankName = $p.BankName
+    $streetQ = [uri]::EscapeDataString("$($p.Street), $city, $state $zip")
+    $cityQ = [uri]::EscapeDataString($city)
+    $nameQ = [uri]::EscapeDataString($full)
 
-    # Close Chrome
+    # Believable mix: daily habits, Chicago life, tech-challenged retiree, family, bait-relevant
+    @(
+        # --- Daily drivers (high visit weight later) ---
+        @{ u = 'https://www.google.com/'; t = 'Google'; w = 40 }
+        @{ u = "https://mail.google.com/mail/u/0/#inbox"; t = "Gmail - $email"; w = 35 }
+        @{ u = 'https://www.facebook.com/'; t = 'Facebook'; w = 25 }
+        @{ u = "https://www.facebook.com/search/top?q=$nameQ"; t = "Facebook search - $full"; w = 3 }
+        @{ u = "https://www.weather.com/weather/today/l/${zip}:4:US"; t = "Weather - $city $zip"; w = 30 }
+        @{ u = 'https://www.msn.com/'; t = 'MSN'; w = 12 }
+        @{ u = 'https://news.yahoo.com/'; t = 'Yahoo News'; w = 8 }
+
+        # --- Local Chicago ---
+        @{ u = 'https://www.chicagotribune.com/'; t = 'Chicago Tribune'; w = 18 }
+        @{ u = 'https://blockclubchicago.org/'; t = 'Block Club Chicago'; w = 6 }
+        @{ u = 'https://www.suntimes.com/'; t = 'Chicago Sun-Times'; w = 10 }
+        @{ u = 'https://www.nbcchicago.com/'; t = 'NBC Chicago'; w = 8 }
+        @{ u = 'https://www.wgn9.com/'; t = 'WGN 9'; w = 7 }
+        @{ u = 'https://www.abc7chicago.com/'; t = 'ABC7 Chicago'; w = 7 }
+        @{ u = 'https://www.comed.com/'; t = 'ComEd'; w = 9 }
+        @{ u = 'https://www.comed.com/MyAccount/'; t = 'ComEd - My Account'; w = 6 }
+        @{ u = 'https://www.peoplesgasdelivery.com/'; t = 'Peoples Gas'; w = 5 }
+        @{ u = 'https://www.cityofchicago.org/'; t = 'City of Chicago'; w = 4 }
+        @{ u = 'https://www.transitchicago.com/'; t = 'CTA'; w = 5 }
+        @{ u = "https://www.google.com/maps/place/$streetQ"; t = "$($p.Street) - Google Maps"; w = 4 }
+        @{ u = "https://www.google.com/search?q=walgreens+near+$zip"; t = "walgreens near $zip - Google Search"; w = 5 }
+        @{ u = "https://www.google.com/search?q=jewel+osco+$zip"; t = "jewel osco $zip - Google Search"; w = 5 }
+        @{ u = 'https://www.jewelosco.com/'; t = 'Jewel-Osco'; w = 8 }
+        @{ u = 'https://www.mariano.com/'; t = "Mariano's"; w = 4 }
+
+        # --- Sports (Cubs / Bears) ---
+        @{ u = 'https://www.mlb.com/cubs'; t = 'Chicago Cubs'; w = 20 }
+        @{ u = 'https://www.nbcsports.com/chicago/cubs'; t = 'Cubs - NBC Sports Chicago'; w = 12 }
+        @{ u = 'https://www.chicagobears.com/'; t = 'Chicago Bears'; w = 14 }
+        @{ u = 'https://www.espn.com/nfl/team/_/name/chi/chicago-bears'; t = 'Chicago Bears - ESPN'; w = 8 }
+        @{ u = 'https://www.bleachernation.com/'; t = 'Bleacher Nation'; w = 6 }
+        @{ u = 'https://www.youtube.com/results?search_query=cubs+highlights'; t = 'cubs highlights - YouTube'; w = 7 }
+        @{ u = 'https://www.youtube.com/results?search_query=bears+highlights+2024'; t = 'bears highlights 2024 - YouTube'; w = 5 }
+
+        # --- Fishing / VFW / hobbies ---
+        @{ u = 'https://www.google.com/search?q=lake+michigan+fishing+report+chicago'; t = 'lake michigan fishing report chicago - Google Search'; w = 10 }
+        @{ u = 'https://www.ifishillinois.org/'; t = 'I Fish Illinois'; w = 6 }
+        @{ u = 'https://www.chicago.gov/city/en/depts/dca/supp_info/chicago_fishing.html'; t = 'Chicago Fishing'; w = 4 }
+        @{ u = 'https://www.basspro.com/'; t = 'Bass Pro Shops'; w = 5 }
+        @{ u = 'https://www.dickssportinggoods.com/'; t = "Dick's Sporting Goods"; w = 4 }
+        @{ u = "https://www.google.com/search?q=vfw+hall+near+$zip+chicago"; t = "vfw hall near $zip chicago - Google Search"; w = 5 }
+        @{ u = 'https://www.vfw.org/'; t = 'VFW'; w = 4 }
+        @{ u = 'https://www.usa.gov/crossword'; t = 'Crossword'; w = 3 }
+        @{ u = 'https://www.google.com/search?q=crossword+puzzle+answers+today'; t = 'crossword puzzle answers today - Google Search'; w = 8 }
+
+        # --- Health / retirement (62, meds, SSA) ---
+        @{ u = 'https://www.ssa.gov/'; t = 'Social Security'; w = 10 }
+        @{ u = 'https://www.ssa.gov/myaccount/'; t = 'my Social Security'; w = 7 }
+        @{ u = 'https://www.medicare.gov/'; t = 'Medicare.gov'; w = 6 }
+        @{ u = 'https://www.aarp.org/'; t = 'AARP'; w = 8 }
+        @{ u = 'https://www.webmd.com/'; t = 'WebMD'; w = 6 }
+        @{ u = 'https://www.mayoclinic.org/'; t = 'Mayo Clinic'; w = 4 }
+        @{ u = 'https://www.google.com/search?q=lisinopril+side+effects'; t = 'lisinopril side effects - Google Search'; w = 3 }
+        @{ u = 'https://www.google.com/search?q=social+security+payment+schedule+2024'; t = 'social security payment schedule 2024 - Google Search'; w = 6 }
+        @{ u = 'https://www.advocatehealth.com/'; t = 'Advocate Health Care'; w = 5 }
+        @{ u = 'https://www.walgreens.com/'; t = 'Walgreens'; w = 9 }
+        @{ u = 'https://www.walgreens.com/topic/pharmacy/refills.jsp'; t = 'Walgreens Pharmacy Refills'; w = 5 }
+
+        # --- Banking / money (cautious retiree) ---
+        @{ u = "https://www.$bank/"; t = $bankName; w = 15 }
+        @{ u = "https://www.$bank/login"; t = "$bankName - Login"; w = 12 }
+        @{ u = "https://$bank/"; t = $bankName; w = 8 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString($bank))"; t = "$bank - Google Search"; w = 6 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("www.$bank"))"; t = "www.$bank - Google Search"; w = 5 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$bankName login"))"; t = "$bankName login - Google Search"; w = 7 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$bankName chicago"))"; t = "$bankName chicago - Google Search"; w = 4 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$bank online banking"))"; t = "$bank online banking - Google Search"; w = 5 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("is $bank legit"))"; t = "is $bank legit - Google Search"; w = 3 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$bankName forgot password"))"; t = "$bankName forgot password - Google Search"; w = 4 }
+        @{ u = 'https://www.chase.com/'; t = 'Chase.com'; w = 4 }
+        @{ u = 'https://www.paypal.com/'; t = 'PayPal'; w = 5 }
+        @{ u = 'https://www.irs.gov/'; t = 'IRS.gov'; w = 5 }
+        @{ u = 'https://www.irs.gov/individuals/get-your-tax-record'; t = 'Get Your Tax Record | IRS'; w = 3 }
+        @{ u = 'https://www.google.com/search?q=is+this+bank+website+real'; t = 'is this bank website real - Google Search'; w = 2 }
+        @{ u = 'https://www.google.com/search?q=how+to+know+if+microsoft+support+call+is+scam'; t = 'how to know if microsoft support call is scam - Google Search'; w = 2 }
+
+        # --- Shopping / home (construction background) ---
+        @{ u = 'https://www.amazon.com/'; t = 'Amazon.com'; w = 14 }
+        @{ u = 'https://www.amazon.com/gp/css/order-history'; t = 'Your Orders'; w = 6 }
+        @{ u = 'https://www.ebay.com/'; t = 'eBay'; w = 7 }
+        @{ u = 'https://chicago.craigslist.org/'; t = 'craigslist: chicago'; w = 9 }
+        @{ u = 'https://chicago.craigslist.org/search/sss?query=fishing+rod'; t = 'fishing rod - chicago craigslist'; w = 3 }
+        @{ u = 'https://chicago.craigslist.org/search/sss?query=lawn+mower'; t = 'lawn mower - chicago craigslist'; w = 3 }
+        @{ u = 'https://www.homedepot.com/'; t = 'The Home Depot'; w = 8 }
+        @{ u = "https://www.homedepot.com/l/Chicago/$zip"; t = "Home Depot near $zip"; w = 4 }
+        @{ u = 'https://www.lowes.com/'; t = "Lowe's"; w = 5 }
+        @{ u = 'https://www.menards.com/'; t = 'Menards'; w = 6 }
+        @{ u = 'https://www.walmart.com/'; t = 'Walmart'; w = 8 }
+        @{ u = 'https://www.costco.com/'; t = 'Costco'; w = 5 }
+
+        # --- Tech-challenged / printer / "help me" searches ---
+        @{ u = 'https://www.google.com/search?q=how+to+fix+printer+offline+windows+10'; t = 'how to fix printer offline windows 10 - Google Search'; w = 8 }
+        @{ u = 'https://www.google.com/search?q=hp+laserjet+paper+jam+tray+2'; t = 'hp laserjet paper jam tray 2 - Google Search'; w = 5 }
+        @{ u = 'https://www.google.com/search?q=how+to+attach+file+to+email+gmail'; t = 'how to attach file to email gmail - Google Search'; w = 6 }
+        @{ u = 'https://www.google.com/search?q=why+is+my+computer+so+slow'; t = 'why is my computer so slow - Google Search'; w = 5 }
+        @{ u = 'https://www.google.com/search?q=how+to+zoom+in+on+chrome'; t = 'how to zoom in on chrome - Google Search'; w = 4 }
+        @{ u = 'https://www.google.com/search?q=is+microsoft+support+phone+number+real'; t = 'is microsoft support phone number real - Google Search'; w = 3 }
+        @{ u = 'https://support.microsoft.com/'; t = 'Microsoft Support'; w = 4 }
+        @{ u = 'https://www.youtube.com/results?search_query=how+to+use+gmail+for+beginners'; t = 'how to use gmail for beginners - YouTube'; w = 5 }
+        @{ u = 'https://www.youtube.com/results?search_query=windows+10+for+seniors'; t = 'windows 10 for seniors - YouTube'; w = 4 }
+
+        # --- Family / grandkids ---
+        @{ u = 'https://www.google.com/search?q=birthday+gift+ideas+for+granddaughter+10'; t = 'birthday gift ideas for granddaughter 10 - Google Search'; w = 3 }
+        @{ u = 'https://www.pinterest.com/'; t = 'Pinterest'; w = 3 }
+        @{ u = 'https://www.ancestry.com/'; t = 'Ancestry'; w = 4 }
+        @{ u = 'https://www.findagrave.com/'; t = 'Find a Grave'; w = 3 }
+
+        # --- Streaming / YouTube ---
+        @{ u = 'https://www.youtube.com/'; t = 'YouTube'; w = 16 }
+        @{ u = 'https://www.netflix.com/'; t = 'Netflix'; w = 7 }
+        @{ u = 'https://www.hulu.com/'; t = 'Hulu'; w = 3 }
+        @{ u = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; t = 'Rick Astley - Never Gonna Give You Up (Official Music Video)'; w = 1 }
+
+        # --- Phone / utilities ---
+        @{ u = 'https://www.att.com/'; t = 'AT&T'; w = 4 }
+        @{ u = 'https://www.att.com/my'; t = 'myAT&T'; w = 3 }
+
+        # --- Persona-flavored searches ---
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$first $last $city"))"; t = "$full $city - Google Search"; w = 2 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("union pension construction chicago"))"; t = 'union pension construction chicago - Google Search'; w = 2 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("best perch fishing Lake Michigan pier"))"; t = 'best perch fishing Lake Michigan pier - Google Search'; w = 4 }
+        @{ u = "https://www.google.com/search?q=$([uri]::EscapeDataString("$nick greene cubs"))"; t = "$nick greene cubs - Google Search"; w = 1 }
+    )
+}
+
+function Seed-ScambaitChromeHistory {
+    Write-Log 'Seeding persona-based Chrome history + download records...' 'INFO'
+    $p = $script:Config.Persona
+
     Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
 
@@ -978,107 +1124,33 @@ function Seed-ScambaitChromeHistory {
     Ensure-Dir $chromeUser
     $historyDb = Join-Path $chromeUser 'History'
 
-    # Ensure Chrome has been launched once so schema exists; if not, create minimal DB
     $chromeExe = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
-    if (-not (Test-Path $historyDb)) {
-        if (Test-Path $chromeExe) {
-            Write-Log 'Launching Chrome once to create profile...' 'INFO'
-            Start-Process $chromeExe -ArgumentList '--no-first-run', '--no-default-browser-check', 'about:blank'
-            Start-Sleep 5
-            Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep 2
-        }
+    if (-not (Test-Path $historyDb) -and (Test-Path $chromeExe)) {
+        Write-Log 'Launching Chrome once to create profile...' 'INFO'
+        Start-Process $chromeExe -ArgumentList '--no-first-run', '--no-default-browser-check', 'about:blank'
+        Start-Sleep 5
+        Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep 2
     }
 
-    $urls = @(
-        @{ u = 'https://www.google.com/'; t = 'Google' }
-        @{ u = 'https://mail.google.com/'; t = 'Gmail' }
-        @{ u = 'https://www.facebook.com/'; t = 'Facebook' }
-        @{ u = 'https://www.amazon.com/'; t = 'Amazon.com' }
-        @{ u = 'https://www.amazon.com/gp/css/order-history'; t = 'Your Orders' }
-        @{ u = 'https://www.ebay.com/'; t = 'eBay' }
-        @{ u = 'https://www.youtube.com/'; t = 'YouTube' }
-        @{ u = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'; t = 'Rick Astley - Never Gonna Give You Up' } # easter egg
-        @{ u = 'https://news.yahoo.com/'; t = 'Yahoo News' }
-        @{ u = 'https://www.msn.com/'; t = 'MSN' }
-        @{ u = 'https://weather.com/'; t = 'Weather' }
-        @{ u = 'https://www.webmd.com/'; t = 'WebMD' }
-        @{ u = 'https://www.mayoclinic.org/'; t = 'Mayo Clinic' }
-        @{ u = 'https://www.irs.gov/'; t = 'IRS.gov' }
-        @{ u = 'https://www.ssa.gov/'; t = 'Social Security' }
-        @{ u = 'https://www.aarp.org/'; t = 'AARP' }
-        @{ u = 'https://www.walmart.com/'; t = 'Walmart' }
-        @{ u = 'https://www.walgreens.com/'; t = 'Walgreens' }
-        @{ u = 'https://www.cvs.com/'; t = 'CVS Pharmacy' }
-        @{ u = 'https://www.craigslist.org/'; t = 'Craigslist' }
-        @{ u = 'https://www.paypal.com/'; t = 'PayPal' }
-        @{ u = "https://www.$($script:Config.Persona.BankDomain)/"; t = $script:Config.Persona.BankName }
-        @{ u = 'https://www.chase.com/'; t = 'Chase.com' }
-        @{ u = 'https://www.bankofamerica.com/'; t = 'Bank of America' }
-        @{ u = 'https://www.netflix.com/'; t = 'Netflix' }
-        @{ u = 'https://www.hulu.com/'; t = 'Hulu' }
-        @{ u = 'https://www.pinterest.com/'; t = 'Pinterest' }
-        @{ u = 'https://www.reddit.com/'; t = 'Reddit' }
-        @{ u = 'https://en.wikipedia.org/wiki/Main_Page'; t = 'Wikipedia' }
-        @{ u = 'https://www.bbc.com/news'; t = 'BBC News' }
-        @{ u = 'https://www.cnn.com/'; t = 'CNN' }
-        @{ u = 'https://www.foxnews.com/'; t = 'Fox News' }
-        @{ u = 'https://www.nytimes.com/'; t = 'The New York Times' }
-        @{ u = 'https://www.linkedin.com/'; t = 'LinkedIn' }
-        @{ u = 'https://outlook.live.com/'; t = 'Outlook' }
-        @{ u = 'https://www.office.com/'; t = 'Microsoft 365' }
-        @{ u = 'https://support.microsoft.com/'; t = 'Microsoft Support' }
-        @{ u = 'https://www.att.com/'; t = 'AT&T' }
-        @{ u = 'https://www.verizon.com/'; t = 'Verizon' }
-        @{ u = 'https://www.delta.com/'; t = 'Delta Air Lines' }
-        @{ u = 'https://www.expedia.com/'; t = 'Expedia' }
-        @{ u = 'https://www.booking.com/'; t = 'Booking.com' }
-        @{ u = 'https://www.tripadvisor.com/'; t = 'Tripadvisor' }
-        @{ u = 'https://www.homedepot.com/'; t = 'The Home Depot' }
-        @{ u = 'https://www.lowes.com/'; t = "Lowe's" }
-        @{ u = 'https://www.costco.com/'; t = 'Costco' }
-        @{ u = 'https://www.samclub.com/'; t = "Sam's Club" }
-        @{ u = 'https://www.ancestry.com/'; t = 'Ancestry' }
-        @{ u = 'https://www.findagrave.com/'; t = 'Find a Grave' }
-        @{ u = 'https://www.whitepages.com/'; t = 'Whitepages' }
-        @{ u = 'https://www.zillow.com/'; t = 'Zillow' }
-        @{ u = 'https://www.realtor.com/'; t = 'Realtor.com' }
-        @{ u = 'https://www.indeed.com/'; t = 'Indeed' }
-        @{ u = 'https://www.craigslist.org/search/sss?query=lawn+mower'; t = 'lawn mower - craigslist' }
-        @{ u = 'https://www.chicagotribune.com/'; t = 'Chicago Tribune' }
-        @{ u = 'https://www.nbcsports.com/chicago/cubs'; t = 'Cubs - NBC Sports Chicago' }
-        @{ u = 'https://www.chicagobears.com/'; t = 'Chicago Bears' }
-        @{ u = 'https://www.weather.com/weather/today/l/60636:4:US'; t = 'Weather - Chicago 60636' }
-        @{ u = 'https://www.comed.com/'; t = 'ComEd' }
-        @{ u = 'https://www.cta.com/'; t = 'CTA' }
-        @{ u = 'https://www.google.com/search?q=lake+michigan+fishing+report'; t = 'lake michigan fishing report - Google Search' }
-        @{ u = 'https://www.google.com/search?q=how+to+fix+printer+offline'; t = 'how to fix printer offline - Google Search' }
-        @{ u = 'https://www.google.com/search?q=social+security+payment+schedule'; t = 'social security payment schedule - Google Search' }
-        @{ u = 'https://www.google.com/search?q=is+microsoft+support+phone+number+real'; t = 'is microsoft support phone number real - Google Search' }
-        @{ u = 'https://www.google.com/search?q=vfw+hall+near+englewood+chicago'; t = 'vfw hall near englewood chicago - Google Search' }
-        @{ u = 'https://www.google.com/search?q=crossword+puzzle+answers+today'; t = 'crossword puzzle answers today - Google Search' }
-    )
-
-    # Prefer System.Data.SQLite if present; else use Python; else write a seed SQL + instructions
-    $sqliteDll = @(
-        (Get-AssetPath 'assets\tools\System.Data.SQLite.dll')
-        'C:\Windows\System32\System.Data.SQLite.dll'
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $urls = @(Get-PersonaChromeUrls)
+    $downloadMeta = Get-PersonaDownloadManifest
 
     $python = Get-Command python -ErrorAction SilentlyContinue
     if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 
     if ($python) {
-        $seedPy = Join-Path $env:TEMP 'seed_chrome_history.py'
-        $json = ($urls | ConvertTo-Json -Compress)
         $jsonPath = Join-Path $env:TEMP 'chrome_urls.json'
-        # PowerShell ConvertTo-Json on array of hashtables with short keys
-        $urls | ConvertTo-Json | Set-Content $jsonPath -Encoding UTF8
+        $dlJsonPath = Join-Path $env:TEMP 'chrome_downloads.json'
+        $urls | ConvertTo-Json -Depth 4 | Set-Content $jsonPath -Encoding UTF8
+        $downloadMeta | ConvertTo-Json -Depth 4 | Set-Content $dlJsonPath -Encoding UTF8
+        $seedPy = Join-Path $env:TEMP 'seed_chrome_history.py'
 
         @"
-import json, os, sqlite3, time, random
+import json, os, sqlite3, time, random, datetime
 hist = r'''$historyDb'''
 urls = json.load(open(r'''$jsonPath''', encoding='utf-8'))
+dls = json.load(open(r'''$dlJsonPath''', encoding='utf-8'))
 os.makedirs(os.path.dirname(hist), exist_ok=True)
 conn = sqlite3.connect(hist)
 c = conn.cursor()
@@ -1102,34 +1174,106 @@ CREATE TABLE IF NOT EXISTS visits(
   visit_duration INTEGER DEFAULT 0,
   incremented_omnibox_typed_score BOOLEAN DEFAULT FALSE
 );
+CREATE TABLE IF NOT EXISTS downloads(
+  id INTEGER PRIMARY KEY,
+  guid VARCHAR NOT NULL,
+  current_path LONGVARCHAR NOT NULL,
+  target_path LONGVARCHAR NOT NULL,
+  start_time INTEGER NOT NULL,
+  received_bytes INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  state INTEGER NOT NULL,
+  danger_type INTEGER NOT NULL,
+  interrupt_reason INTEGER NOT NULL,
+  hash BLOB NOT NULL,
+  end_time INTEGER NOT NULL,
+  opened INTEGER NOT NULL,
+  last_access_time INTEGER NOT NULL,
+  transient INTEGER NOT NULL,
+  referrer VARCHAR NOT NULL,
+  site_url VARCHAR NOT NULL,
+  tab_url VARCHAR NOT NULL,
+  tab_referrer_url VARCHAR NOT NULL,
+  http_method VARCHAR NOT NULL,
+  by_ext_id VARCHAR NOT NULL,
+  by_ext_name VARCHAR NOT NULL,
+  etag VARCHAR NOT NULL,
+  last_modified VARCHAR NOT NULL,
+  mime_type VARCHAR(255) NOT NULL,
+  original_mime_type VARCHAR(255) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS downloads_url_chains(
+  id INTEGER NOT NULL,
+  chain_index INTEGER NOT NULL,
+  url LONGVARCHAR NOT NULL,
+  PRIMARY KEY (id, chain_index)
+);
 ''')
-# Chrome epoch: microseconds since 1601-01-01
-def chrome_time(days_ago, hour=12):
-    # approximate: unix + 11644473600 seconds, * 1e6
-    import datetime
-    dt = datetime.datetime.utcnow() - datetime.timedelta(days=days_ago, hours=random.randint(0,5))
+
+def chrome_time(days_ago):
+    dt = datetime.datetime.utcnow() - datetime.timedelta(days=days_ago, hours=random.randint(0, 8), minutes=random.randint(0, 59))
     unix = time.mktime(dt.timetuple())
     return int((unix + 11644473600) * 1000000)
 
-for i, row in enumerate(urls):
+# Clear prior seed rows for idempotent re-runs (best-effort)
+try:
+    c.execute('DELETE FROM visits')
+    c.execute('DELETE FROM urls')
+    c.execute('DELETE FROM downloads_url_chains')
+    c.execute('DELETE FROM downloads')
+except Exception:
+    pass
+
+for row in urls:
     u = row.get('u') or row.get('url')
     t = row.get('t') or row.get('title') or u
-    visits = random.randint(1, 18)
-    last = chrome_time(random.randint(0, 120))
+    w = int(row.get('w') or 1)
+    visits = max(1, int(random.gauss(w, max(1, w/3))))
+    visits = min(visits, 60)
+    typed = 1 if w >= 12 and random.random() < 0.45 else random.randint(0, 1)
+    last = chrome_time(random.randint(0, min(180, 5 + int(200/max(w,1)))))
     c.execute('INSERT INTO urls(url,title,visit_count,typed_count,last_visit_time,hidden) VALUES (?,?,?,?,?,0)',
-              (u, t, visits, random.randint(0,3), last))
+              (u, t, visits, typed, last))
     uid = c.lastrowid
-    for v in range(visits):
+    for _ in range(visits):
+        # LINK = 805306368 is common typed/link transition bucket Chrome uses
         c.execute('INSERT INTO visits(url,visit_time,from_visit,transition,visit_duration) VALUES (?,?,NULL,805306368,?)',
-                  (uid, chrome_time(random.randint(0,120)), random.randint(5000,300000)))
+                  (uid, chrome_time(random.randint(0, 180)), random.randint(3000, 420000)))
+
+import uuid
+dl_ok = 0
+dl_id = 1
+for d in dls:
+    try:
+        path = d.get('path')
+        url = d.get('url')
+        mime = d.get('mime') or 'application/octet-stream'
+        size = int(d.get('size') or random.randint(20_000, 2_500_000))
+        days = int(d.get('days_ago') or random.randint(1, 90))
+        start = chrome_time(days)
+        end = start + random.randint(500_000, 8_000_000)
+        guid = str(uuid.uuid4())
+        c.execute('''INSERT INTO downloads(
+          id, guid, current_path, target_path, start_time, received_bytes, total_bytes,
+          state, danger_type, interrupt_reason, hash, end_time, opened, last_access_time,
+          transient, referrer, site_url, tab_url, tab_referrer_url, http_method,
+          by_ext_id, by_ext_name, etag, last_modified, mime_type, original_mime_type
+        ) VALUES (?,?,?,?,?,?,?, 1,0,0,?,?,1,?, 0,?,?,?,?, 'GET', '','', '','', ?,?)''',
+          (dl_id, guid, path, path, start, size, size, b'', end, end, url, url, url, '', mime, mime))
+        c.execute('INSERT INTO downloads_url_chains(id, chain_index, url) VALUES (?,?,?)', (dl_id, 0, url))
+        dl_ok += 1
+        dl_id += 1
+    except Exception as ex:
+        print('download row skipped:', ex)
+
 conn.commit()
 conn.close()
-print('seeded', len(urls), 'urls')
+print('seeded', len(urls), 'urls and', dl_ok, 'downloads')
 "@ | Set-Content $seedPy -Encoding UTF8
 
         & $python.Source $seedPy
         if ($LASTEXITCODE -eq 0) {
-            Write-Log "Chrome history seeded ($($urls.Count) URLs)" 'OK'
+            Write-Log "Chrome history seeded ($($urls.Count) URLs, $($downloadMeta.Count) download records) for $($p.FullName)" 'OK'
         }
         else {
             Write-Log 'Python seed failed; writing fallback bookmark HTML' 'WARN'
@@ -1137,36 +1281,185 @@ print('seeded', len(urls), 'urls')
         }
     }
     else {
-        Write-Log 'Python not found - writing Bookmarks + History seed HTML fallback' 'WARN'
+        Write-Log 'Python not found - writing Bookmarks HTML fallback (install Python for full History DB seed)' 'WARN'
         Export-ChromeBookmarkFallback -Urls $urls
     }
 
-    # Also write a bookmarks file Chrome will pick up if History seed fails
+    # Bookmarks bar - persona folders
     $bmPath = Join-Path $chromeUser 'Bookmarks'
-    if (-not (Test-Path $bmPath)) {
-        $children = foreach ($row in $urls | Select-Object -First 25) {
-            @{
-                type = 'url'
-                name = $row.t
-                url  = $row.u
-                date_added = '13300000000000000'
+    $bankUrl = "https://www.$($p.BankDomain)/"
+    $bookmarks = @{
+        roots = @{
+            bookmark_bar = @{
+                children = @(
+                    @{ type = 'url'; name = 'Gmail'; url = 'https://mail.google.com/'; date_added = '13300000000000000' }
+                    @{ type = 'url'; name = $p.BankName; url = $bankUrl; date_added = '13300000000000001' }
+                    @{ type = 'url'; name = 'ComEd'; url = 'https://www.comed.com/'; date_added = '13300000000000002' }
+                    @{ type = 'url'; name = 'Cubs'; url = 'https://www.mlb.com/cubs'; date_added = '13300000000000003' }
+                    @{ type = 'url'; name = 'Facebook'; url = 'https://www.facebook.com/'; date_added = '13300000000000004' }
+                    @{ type = 'url'; name = 'Weather'; url = "https://www.weather.com/weather/today/l/$($p.Zip):4:US"; date_added = '13300000000000005' }
+                    @{
+                        type = 'folder'
+                        name = 'Important'
+                        date_added = '13300000000000006'
+                        children = @(
+                            @{ type = 'url'; name = 'Social Security'; url = 'https://www.ssa.gov/'; date_added = '13300000000000007' }
+                            @{ type = 'url'; name = 'Walgreens'; url = 'https://www.walgreens.com/'; date_added = '13300000000000008' }
+                            @{ type = 'url'; name = 'Tribune'; url = 'https://www.chicagotribune.com/'; date_added = '13300000000000009' }
+                        )
+                    }
+                )
+                name = 'Bookmarks bar'
+                type = 'folder'
             }
+            other = @{ children = @(); name = 'Other bookmarks'; type = 'folder' }
+            synced = @{ children = @(); name = 'Mobile bookmarks'; type = 'folder' }
         }
-        $bookmarks = @{
-            roots = @{
-                bookmark_bar = @{
-                    children = @($children)
-                    name = 'Bookmarks bar'
-                    type = 'folder'
-                }
-                other = @{ children = @(); name = 'Other bookmarks'; type = 'folder' }
-                synced = @{ children = @(); name = 'Mobile bookmarks'; type = 'folder' }
-            }
-            version = 1
-        }
-        $bookmarks | ConvertTo-Json -Depth 8 | Set-Content $bmPath -Encoding UTF8
-        Write-Log 'Chrome Bookmarks file created' 'OK'
+        version = 1
     }
+    $bookmarks | ConvertTo-Json -Depth 10 | Set-Content $bmPath -Encoding UTF8
+    Write-Log 'Chrome Bookmarks bar seeded with persona folders' 'OK'
+}
+
+function Get-PersonaDownloadManifest {
+    $p = $script:Config.Persona
+    $downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+    if (-not $downloads) { $downloads = Join-Path $env:USERPROFILE 'Downloads' }
+
+    $zip = if ($p.Zip) { $p.Zip } else { '60636' }
+    $last = $p.LastName
+
+    @(
+        @{ file = "ComEd_Bill_$($zip)_Jan.pdf"; url = 'https://www.comed.com/MyAccount/billing/statement.pdf'; mime = 'application/pdf'; size = 184320; days_ago = 18; kind = 'pdf'; title = 'ComEd Bill' }
+        @{ file = "ComEd_Bill_$($zip)_Dec.pdf"; url = 'https://www.comed.com/MyAccount/billing/statement-dec.pdf'; mime = 'application/pdf'; size = 179200; days_ago = 48; kind = 'pdf'; title = 'ComEd Bill Dec' }
+        @{ file = 'SSA_Benefit_Letter.pdf'; url = 'https://www.ssa.gov/myaccount/benefit-letter.pdf'; mime = 'application/pdf'; size = 220160; days_ago = 35; kind = 'pdf'; title = 'SSA Benefit Letter' }
+        @{ file = 'Medicare_Summary_Notice.pdf'; url = 'https://www.medicare.gov/forms/msn.pdf'; mime = 'application/pdf'; size = 256000; days_ago = 40; kind = 'pdf'; title = 'Medicare Summary' }
+        @{ file = "$($last)_2023_Tax_Documents.pdf"; url = 'https://www.irs.gov/pub/irs-pdf/f1040.pdf'; mime = 'application/pdf'; size = 512000; days_ago = 95; kind = 'pdf'; title = 'Tax Documents' }
+        @{ file = 'Walgreens_Rx_Receipt.pdf'; url = 'https://www.walgreens.com/receipts/rx.pdf'; mime = 'application/pdf'; size = 65536; days_ago = 12; kind = 'pdf'; title = 'Rx Receipt' }
+        @{ file = 'Cubs_Printable_Schedule.pdf'; url = 'https://www.mlb.com/cubs/schedule/printable.pdf'; mime = 'application/pdf'; size = 98304; days_ago = 22; kind = 'pdf'; title = 'Cubs Schedule' }
+        @{ file = 'Lake_Michigan_Fishing_Regs.pdf'; url = 'https://www.ifishillinois.org/docs/fishing_regs.pdf'; mime = 'application/pdf'; size = 409600; days_ago = 60; kind = 'pdf'; title = 'Fishing Regs' }
+        @{ file = 'HP_LaserJet_Manual.pdf'; url = 'https://support.hp.com/us-en/manual/laserjet.pdf'; mime = 'application/pdf'; size = 1048576; days_ago = 70; kind = 'pdf'; title = 'Printer Manual' }
+        @{ file = 'VFW_Meeting_Flyer.pdf'; url = 'https://www.vfw.org/local/meeting-flyer.pdf'; mime = 'application/pdf'; size = 73728; days_ago = 9; kind = 'pdf'; title = 'VFW Flyer' }
+        @{ file = 'Insurance_Card_Scan.jpg'; url = 'https://www.advocatehealth.com/portal/insurance-card.jpg'; mime = 'image/jpeg'; size = 345000; days_ago = 55; kind = 'jpg'; title = 'Insurance Card' }
+        @{ file = 'Grandkids_Birthday_Photo.jpg'; url = 'https://www.facebook.com/download/grandkids.jpg'; mime = 'image/jpeg'; size = 520000; days_ago = 14; kind = 'jpg'; title = 'Grandkids Photo' }
+        @{ file = 'Fishing_Trip_May.jpg'; url = 'https://www.facebook.com/download/fishing-may.jpg'; mime = 'image/jpeg'; size = 610000; days_ago = 50; kind = 'jpg'; title = 'Fishing Trip' }
+        @{ file = 'Seeley_Ave_House_Photo.jpg'; url = 'https://www.zillow.com/photos/seeley.jpg'; mime = 'image/jpeg'; size = 480000; days_ago = 120; kind = 'jpg'; title = 'House Photo' }
+        @{ file = 'amazon_order_slippers.pdf'; url = 'https://www.amazon.com/gp/css/order.pdf'; mime = 'application/pdf'; size = 45056; days_ago = 27; kind = 'pdf'; title = 'Amazon Order' }
+        @{ file = 'menards_receipt_garden.pdf'; url = 'https://www.menards.com/receipts/garden.pdf'; mime = 'application/pdf'; size = 38912; days_ago = 33; kind = 'pdf'; title = 'Menards Receipt' }
+        @{ file = 'how_to_use_gmail_notes.txt'; url = 'https://support.google.com/mail/answer/print'; mime = 'text/plain'; size = 4096; days_ago = 16; kind = 'txt'; title = 'Gmail Notes'; body = @"
+Tommy wrote this for me:
+1. Open Chrome
+2. Click Gmail bookmark
+3. Paperclip button = attach file
+4. Do not click weird popups
+Password is in Documents\Passwords
+"@ }
+        @{ file = 'wifi_password.txt'; url = 'https://192.168.1.1/settings'; mime = 'text/plain'; size = 128; days_ago = 80; kind = 'txt'; title = 'WiFi'; body = "Netgear78 / Seeley60636`r`n(written down so I dont forget)" }
+        @{ file = 'Printer_fix_steps.txt'; url = 'https://support.hp.com/print-fix.txt'; mime = 'text/plain'; size = 2048; days_ago = 11; kind = 'txt'; title = 'Printer Fix'; body = @"
+Paper jam tray 2 again
+Denise said turn off, pull tray, clear paper, turn on
+Still says offline half the time
+"@ }
+        @{ file = 'Setup_AnyDesk.exe'; url = 'https://download.anydesk.com/AnyDesk.exe'; mime = 'application/x-msdownload'; size = 4200000; days_ago = 3; kind = 'stub'; title = 'AnyDesk' }
+        @{ file = 'ChromeSetup.exe'; url = 'https://dl.google.com/chrome/install/ChromeStandaloneSetup64.exe'; mime = 'application/x-msdownload'; size = 78000000; days_ago = 100; kind = 'stub'; title = 'Chrome Setup' }
+    ) | ForEach-Object {
+        $_['path'] = Join-Path $downloads $_.file
+        $_
+    }
+}
+
+function Seed-ScambaitDownloads {
+    Write-Log 'Seeding believable Downloads folder for persona...' 'INFO'
+    $p = $script:Config.Persona
+    $manifest = @(Get-PersonaDownloadManifest)
+    $downloads = Split-Path $manifest[0].path -Parent
+    Ensure-Dir $downloads
+    Ensure-Dir (Join-Path $downloads 'Old Downloads')
+    Ensure-Dir (Join-Path $downloads 'Taxes')
+    Ensure-Dir (Join-Path $downloads 'Photos from phone')
+
+    foreach ($item in $manifest) {
+        $path = $item.path
+        $dir = Split-Path $path -Parent
+        Ensure-Dir $dir
+
+        switch ($item.kind) {
+            'pdf' {
+                # Minimal valid-enough PDF that opens in most readers
+                $title = $item.title
+                $pdf = @"
+%PDF-1.4
+1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj
+2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj
+3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources<< /Font<< /F1 5 0 R >> >> >>endobj
+4 0 obj<< /Length 120 >>stream
+BT /F1 18 Tf 50 720 Td ($title) Tj 0 -30 Td /F1 12 Tf ($($p.FullName)) Tj 0 -20 Td ($($p.Street), $($p.City) $($p.State) $($p.Zip)) Tj ET
+endstream
+endobj
+5 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000266 00000 n 
+0000000438 00000 n 
+trailer<< /Size 6 /Root 1 0 R >>
+startxref
+510
+%%EOF
+"@
+                Set-Content -Path $path -Value $pdf -Encoding ASCII
+            }
+            'jpg' {
+                if (Get-Command New-MinimalBmp -ErrorAction SilentlyContinue) {
+                    $bmp = [IO.Path]::ChangeExtension($path, '.bmp')
+                    New-MinimalBmp -Path $bmp -Width 800 -Height 600 -Seed ($item.days_ago + 17)
+                    # Keep .jpg name expected by Chrome download path: copy bytes with jpg extension
+                    Copy-Item $bmp $path -Force
+                    Remove-Item $bmp -Force -ErrorAction SilentlyContinue
+                }
+                else {
+                    Set-Content -Path $path -Value 'placeholder-image' -Encoding ASCII
+                }
+            }
+            'txt' {
+                $body = if ($item.body) { $item.body } else { $item.title }
+                Set-Content -Path $path -Value $body -Encoding UTF8
+            }
+            'stub' {
+                # Tiny stub so the filename exists; not a real installer
+                [IO.File]::WriteAllBytes($path, [byte[]](0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00))
+            }
+            default {
+                Set-Content -Path $path -Value $item.title -Encoding UTF8
+            }
+        }
+
+        # Backdate timestamps
+        try {
+            $when = (Get-Date).AddDays(-1 * [int]$item.days_ago).AddHours(-1 * (Get-Random -Minimum 1 -Maximum 10))
+            $fi = Get-Item $path
+            $fi.CreationTime = $when
+            $fi.LastWriteTime = $when
+            $fi.LastAccessTime = $when.AddDays((Get-Random -Minimum 0 -Maximum 5))
+        }
+        catch {}
+    }
+
+    # A few extras only on disk (not necessarily in Chrome downloads DB)
+    $extras = @{
+        (Join-Path $downloads 'Old Downloads\readme.txt') = "Old stuff Tommy said not to delete`r`n$($p.FullName)"
+        (Join-Path $downloads 'Taxes\H&R_Block_appointment.txt') = "March 12 - bring pension 1099-R and property tax bill"
+        (Join-Path $downloads 'Photos from phone\put_photos_here.txt') = 'Denise transfers photos from my flip phone somehow'
+    }
+    foreach ($kv in $extras.GetEnumerator()) {
+        Ensure-Dir (Split-Path $kv.Key -Parent)
+        Set-Content -Path $kv.Key -Value $kv.Value -Encoding UTF8
+    }
+
+    Write-Log "Downloads seeded ($($manifest.Count) files) in $downloads" 'OK'
 }
 
 function Export-ChromeBookmarkFallback {
@@ -1969,6 +2262,7 @@ Invoke-Step 'Add fake printer' 'AddFakePrinter' { Add-ScambaitFakePrinter }
 Invoke-Step 'Install common programs' 'InstallPrograms' { Install-ScambaitPrograms }
 Invoke-Step 'Generate personal files' 'GeneratePersonalFiles' { Generate-ScambaitPersonalFiles }
 Invoke-Step 'Copy wallpapers' 'CopyWallpapers' { Copy-ScambaitWallpapers }
+Invoke-Step 'Seed Downloads folder' 'SeedDownloads' { Seed-ScambaitDownloads }
 Invoke-Step 'Seed Chrome history' 'SeedChromeHistory' { Seed-ScambaitChromeHistory }
 Invoke-Step 'Setup camera loop' 'SetupCameraLoop' { Setup-ScambaitCameraLoop }
 Invoke-Step 'Install Moo.FuckScreenConnect' 'InstallFuckScreenConnect' { Install-ScambaitFuckScreenConnect }
