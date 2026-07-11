@@ -162,7 +162,9 @@ $script:Config = @{
         PortableUrl     = 'https://master.dl.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16.7z?viasf=1'
         InstallerName   = 'xampp-installer.exe'
         MinBytes        = 100000000
-        DsjasReleaseApi = 'https://api.github.com/repos/DSJAS/DSJAS/releases/latest'
+        DsjasReleaseApi = 'https://api.github.com/repos/DSJAS/DSJAS/releases'
+        # Direct fallback when API is rate-limited (all current DSJAS tags are prerelease)
+        DsjasDownloadUrl = 'https://github.com/DSJAS/DSJAS/releases/download/0.1.5-alpha/DSJAS-release-alpha.zip'
     }
 
     Features = @{
@@ -573,24 +575,52 @@ function Expand-ZipSafe {
 function Get-GithubLatestAsset {
     param(
         [string]$ApiUrl,
-        [string[]]$NameMatch = @('\.7z$', '\.zip$')
+        [string[]]$NameMatch = @('\.7z$', '\.zip$'),
+        [switch]$IncludePrerelease
     )
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $headers = @{ 'User-Agent' = 'ScambaitInstaller'; 'Accept' = 'application/vnd.github+json' }
-    $release = Invoke-RestMethod -Uri $ApiUrl -Headers $headers
-    foreach ($pat in $NameMatch) {
-        $asset = $release.assets | Where-Object { $_.name -match $pat } | Select-Object -First 1
-        if ($asset) {
-            return @{
-                Name       = $asset.name
-                Url        = $asset.browser_download_url
-                Tag        = $release.tag_name
-                Body       = $release.body
-                ZipballUrl = $release.zipball_url
+
+    $payload = $null
+    try {
+        $payload = Invoke-RestMethod -Uri $ApiUrl -Headers $headers
+    }
+    catch {
+        # /releases/latest 404s when every release is marked prerelease (DSJAS case)
+        if ($ApiUrl -match '/releases/latest/?$') {
+            $listUrl = $ApiUrl -replace '/latest/?$', ''
+            Write-Log "GitHub latest release 404; falling back to $listUrl (includes prereleases)" 'WARN'
+            $payload = Invoke-RestMethod -Uri $listUrl -Headers $headers
+        }
+        else {
+            throw
+        }
+    }
+
+    # List endpoint returns an array; single release is one object
+    $releases = @($payload)
+    if (-not $IncludePrerelease) {
+        $stable = @($releases | Where-Object { -not $_.prerelease })
+        if ($stable.Count -gt 0) { $releases = $stable }
+        # else keep prereleases - better than failing when only alphas exist
+    }
+
+    foreach ($release in $releases) {
+        foreach ($pat in $NameMatch) {
+            $asset = @($release.assets) | Where-Object { $_.name -match $pat } | Select-Object -First 1
+            if ($asset) {
+                return @{
+                    Name       = $asset.name
+                    Url        = $asset.browser_download_url
+                    Tag        = $release.tag_name
+                    Body       = $release.body
+                    ZipballUrl = $release.zipball_url
+                }
             }
         }
     }
-    $names = ($release.assets | ForEach-Object { $_.name }) -join ', '
+
+    $names = @($releases | ForEach-Object { $_.assets | ForEach-Object { $_.name } }) -join ', '
     throw "No matching asset on $ApiUrl (have: $names)"
 }
 
@@ -2883,25 +2913,38 @@ FLUSH PRIVILEGES;
             Move-Item $_.FullName -Destination $old -Force -ErrorAction SilentlyContinue
         }
 
-        $zip = Get-ChildItem $tools -Filter '*DSJAS*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $zip = Get-ChildItem $tools -Filter '*DSJAS*.zip' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 100000 } |
+            Select-Object -First 1
         if (-not $zip -and -not $script:SkipDownloads) {
+            $zipPath = Join-Path $tools 'DSJAS-release-alpha.zip'
             try {
-                $asset = Get-GithubLatestAsset -ApiUrl $x.DsjasReleaseApi -NameMatch '\.zip$'
+                $asset = Get-GithubLatestAsset -ApiUrl $x.DsjasReleaseApi -NameMatch @('DSJAS.*\.zip$', '\.zip$') -IncludePrerelease
                 $zipPath = Join-Path $tools $asset.Name
-                Download-File -Url $asset.Url -OutFile $zipPath
+                Download-File -Url $asset.Url -OutFile $zipPath -MinBytes 100000
                 $zip = Get-Item $zipPath
-                Write-Log "Downloaded DSJAS $($asset.Tag)" 'OK'
+                Write-Log "Downloaded DSJAS $($asset.Tag) ($($asset.Name))" 'OK'
             }
             catch {
-                Write-Log "DSJAS download failed: $($_.Exception.Message)" 'ERROR'
-                Write-Log 'Download from https://github.com/DSJAS/DSJAS/releases into assets\tools\' 'WARN'
-                return
+                Write-Log "DSJAS GitHub API/asset failed: $($_.Exception.Message)" 'WARN'
+                if ($x.DsjasDownloadUrl) {
+                    try {
+                        Download-File -Url $x.DsjasDownloadUrl -OutFile $zipPath -MinBytes 100000
+                        $zip = Get-Item $zipPath
+                        Write-Log 'Downloaded DSJAS via direct release URL' 'OK'
+                    }
+                    catch {
+                        throw "DSJAS download failed: $($_.Exception.Message). Place DSJAS-release-alpha.zip in assets\tools\"
+                    }
+                }
+                else {
+                    throw "DSJAS download failed: $($_.Exception.Message). Place zip from https://github.com/DSJAS/DSJAS/releases into assets\tools\"
+                }
             }
         }
 
         if (-not $zip) {
-            Write-Log 'DSJAS zip missing' 'ERROR'
-            return
+            throw 'DSJAS zip missing. Download DSJAS-release-alpha.zip from https://github.com/DSJAS/DSJAS/releases'
         }
 
         $extract = Join-Path $tools 'dsjas_extract'
