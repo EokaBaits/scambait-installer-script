@@ -170,6 +170,10 @@ $script:Config = @{
         DsjasReleaseApi = 'https://api.github.com/repos/DSJAS/DSJAS/releases'
         # Direct fallback when API is rate-limited (all current DSJAS tags are prerelease)
         DsjasDownloadUrl = 'https://github.com/DSJAS/DSJAS/releases/download/0.1.5-alpha/DSJAS-release-alpha.zip'
+        # mbwi.com visual theme for DSJAS (https://github.com/EokaBaits/Midwest-Bank)
+        DsjasThemeName    = 'Midwest-Bank'
+        DsjasThemeZipUrl  = 'https://github.com/EokaBaits/Midwest-Bank/archive/refs/heads/main.zip'
+        DsjasThemeRepoApi = 'https://api.github.com/repos/EokaBaits/Midwest-Bank/zipball/main'
     }
 
     Features = @{
@@ -3996,6 +4000,165 @@ function Install-XamppFromPortableArchive {
     Write-Log "XAMPP portable staged at $($XamppConfig.InstallDir)" 'OK'
 }
 
+function Test-DsjasMidwestBankThemeInstalled {
+    param([string]$Htdocs)
+    $themeName = if ($script:Config.Xampp.DsjasThemeName) { $script:Config.Xampp.DsjasThemeName } else { 'Midwest-Bank' }
+    $themeDir = Join-Path $Htdocs "admin\site\UI\$themeName"
+    $cfg = Join-Path $Htdocs 'admin\site\UI\config.ini'
+    if (-not [IO.Directory]::Exists($themeDir)) { return $false }
+    # Theme must have an entry point (Index/Bootstrap or styles)
+    $hasFiles = (
+        [IO.File]::Exists((Join-Path $themeDir 'Index.php')) -or
+        [IO.File]::Exists((Join-Path $themeDir 'Bootstrap.php')) -or
+        [IO.Directory]::Exists((Join-Path $themeDir 'styles'))
+    )
+    if (-not $hasFiles) { return $false }
+    if (-not [IO.File]::Exists($cfg)) { return $false }
+    try {
+        $raw = [IO.File]::ReadAllText($cfg)
+        $extPat = '(?im)current_UI_extension\s*=\s*"?' + [regex]::Escape($themeName)
+        return (($raw -match $extPat) -and ($raw -match '(?im)use_default\s*=\s*"?0"?'))
+    }
+    catch {
+        return $false
+    }
+}
+
+function Install-DsjasMidwestBankTheme {
+    param(
+        [string]$Htdocs,
+        [string]$ToolsDir
+    )
+    $themeName = if ($script:Config.Xampp.DsjasThemeName) { $script:Config.Xampp.DsjasThemeName } else { 'Midwest-Bank' }
+    $zipUrl = if ($script:Config.Xampp.DsjasThemeZipUrl) {
+        $script:Config.Xampp.DsjasThemeZipUrl
+    }
+    else {
+        'https://github.com/EokaBaits/Midwest-Bank/archive/refs/heads/main.zip'
+    }
+
+    $uiRoot = Join-Path $Htdocs 'admin\site\UI'
+    if (-not [IO.Directory]::Exists((Join-Path $Htdocs 'admin'))) {
+        Write-Log 'DSJAS admin/ missing - finish DSJAS web setup first, then re-run for Midwest-Bank theme' 'WARN'
+        return $false
+    }
+    Ensure-Dir $uiRoot
+
+    $themeDest = Join-Path $uiRoot $themeName
+    Write-Log "Installing DSJAS theme $themeName from GitHub (EokaBaits/Midwest-Bank)..." 'INFO'
+
+    $zipPath = Join-Path $ToolsDir 'Midwest-Bank-main.zip'
+    $needDl = $script:Force -or -not (Test-Path $zipPath) -or ((Get-Item $zipPath -ErrorAction SilentlyContinue).Length -lt 1000)
+    if ($needDl -and -not $script:SkipDownloads) {
+        try {
+            Download-File -Url $zipUrl -OutFile $zipPath -MinBytes 1000
+        }
+        catch {
+            # API zipball sometimes works when archive/refs is blocked
+            $apiZip = if ($script:Config.Xampp.DsjasThemeRepoApi) {
+                $script:Config.Xampp.DsjasThemeRepoApi
+            }
+            else {
+                'https://api.github.com/repos/EokaBaits/Midwest-Bank/zipball/main'
+            }
+            Write-Log "Theme zip URL failed ($($_.Exception.Message)); trying API zipball..." 'WARN'
+            Download-File -Url $apiZip -OutFile $zipPath -MinBytes 1000
+        }
+    }
+    if (-not (Test-Path $zipPath)) {
+        throw "Midwest-Bank theme zip missing. Place at $zipPath or allow download from https://github.com/EokaBaits/Midwest-Bank"
+    }
+
+    $extract = Join-Path $ToolsDir 'midwest_bank_theme_extract'
+    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+    Expand-ZipSafe -Zip $zipPath -Dest $extract
+
+    # GitHub archive is Midwest-Bank-main/ or EokaBaits-Midwest-Bank-<hash>/
+    $payload = $extract
+    $topDirs = @(Get-ChildItem $extract -Directory -ErrorAction SilentlyContinue)
+    $topFiles = @(Get-ChildItem $extract -File -ErrorAction SilentlyContinue)
+    if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
+        $payload = $topDirs[0].FullName
+    }
+    elseif ($topDirs.Count -gt 1) {
+        $named = $topDirs | Where-Object { $_.Name -match 'Midwest-Bank' } | Select-Object -First 1
+        if ($named) { $payload = $named.FullName }
+    }
+
+    if (-not (
+            [IO.File]::Exists((Join-Path $payload 'Index.php')) -or
+            [IO.File]::Exists((Join-Path $payload 'Bootstrap.php')) -or
+            [IO.Directory]::Exists((Join-Path $payload 'styles'))
+        )) {
+        throw "Midwest-Bank theme archive did not contain expected theme files under $payload"
+    }
+
+    if ([IO.Directory]::Exists($themeDest)) {
+        Remove-Item -LiteralPath $themeDest -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Ensure-Dir $themeDest
+    Copy-Item (Join-Path $payload '*') -Destination $themeDest -Recurse -Force
+    Write-Log "Theme files copied to $themeDest" 'OK'
+
+    # Point DSJAS UI at Midwest-Bank (per theme README)
+    $cfgPath = Join-Path $uiRoot 'config.ini'
+    $cfgBody = @"
+[config]
+use_default="0"
+
+[extensions]
+current_UI_extension="$themeName"
+"@
+    if ([IO.File]::Exists($cfgPath)) {
+        $bak = "$cfgPath.bak-scambait"
+        if (-not [IO.File]::Exists($bak)) {
+            Copy-Item -LiteralPath $cfgPath -Destination $bak -Force
+        }
+        $raw = [IO.File]::ReadAllText($cfgPath)
+        if ($raw -match '(?im)^\s*use_default\s*=') {
+            $raw = [regex]::Replace($raw, '(?im)^\s*use_default\s*=\s*.*$', 'use_default="0"')
+        }
+        else {
+            if ($raw -notmatch '(?im)\[config\]') {
+                $raw = "[config]`r`nuse_default=`"0`"`r`n`r`n" + $raw
+            }
+            else {
+                $raw = [regex]::Replace($raw, '(?im)(\[config\])', "`$1`r`nuse_default=`"0`"")
+            }
+        }
+        if ($raw -match '(?im)^\s*current_UI_extension\s*=') {
+            $raw = [regex]::Replace($raw, '(?im)^\s*current_UI_extension\s*=\s*.*$', "current_UI_extension=`"$themeName`"")
+        }
+        else {
+            if ($raw -notmatch '(?im)\[extensions\]') {
+                $raw = $raw.TrimEnd() + "`r`n`r`n[extensions]`r`ncurrent_UI_extension=`"$themeName`"`r`n"
+            }
+            else {
+                $raw = [regex]::Replace($raw, '(?im)(\[extensions\])', "`$1`r`ncurrent_UI_extension=`"$themeName`"")
+            }
+        }
+        [IO.File]::WriteAllText($cfgPath, $raw)
+    }
+    else {
+        [IO.File]::WriteAllText($cfgPath, $cfgBody)
+    }
+    Write-Log "DSJAS UI config set to $themeName (use_default=0)" 'OK'
+
+    # Optional favicon at site root
+    $favSrc = Join-Path $themeDest 'assets\favicon.ico'
+    if ([IO.File]::Exists($favSrc)) {
+        Copy-Item -LiteralPath $favSrc -Destination (Join-Path $Htdocs 'favicon.ico') -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $favSrc -Destination (Join-Path $Htdocs 'favicon') -Force -ErrorAction SilentlyContinue
+        Write-Log 'Copied Midwest-Bank favicon to htdocs root' 'OK'
+    }
+
+    if (-not (Test-DsjasMidwestBankThemeInstalled -Htdocs $Htdocs)) {
+        throw 'Midwest-Bank theme install verification failed'
+    }
+    Write-Log 'Midwest-Bank DSJAS theme installed (mbwi.com look)' 'OK'
+    return $true
+}
+
 function Install-ScambaitXamppDsjas {
     Write-Log 'Installing XAMPP + DSJAS (fake bank) per guide...' 'INFO'
     $x = $script:Config.Xampp
@@ -4192,6 +4355,8 @@ FLUSH PRIVILEGES;
         Write-Log 'DSJAS appears already deployed in htdocs' 'INFO'
     }
 
+    Install-DsjasMidwestBankTheme -Htdocs $htdocs -ToolsDir $tools
+
     # Hosts file for bank domain (guide Part III - gateway IP)
     # If XAMPP runs IN the VM, use 127.0.0.1. If on host, use default gateway.
     $bankIp = '127.0.0.1'
@@ -4239,6 +4404,7 @@ DB user:  $($persona.BankDbUser)
 DB pass:  $($persona.BankDbPassword)
 Admin:    $($persona.BankAdminUser) / $($persona.BankAdminPass)
 Bank:     $($persona.BankName)
+Theme:    Midwest-Bank (mbwi.com clone from GitHub)
 
 SSL cert is auto-generated and trusted in Windows Root.
 If Chrome still warns once: fully quit Chrome (tray too) and reopen.
@@ -4385,7 +4551,8 @@ Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppD
     $noLegacy = -not (Test-XamppLegacyPresent)
     $dsjasOk = (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
     $phpOk = Test-XamppPhpExtensionsReady -InstallDir $dir
-    $atCorrectPath -and $noLegacy -and $dsjasOk -and $phpOk
+    $themeOk = Test-DsjasMidwestBankThemeInstalled -Htdocs $htdocs
+    $atCorrectPath -and $noLegacy -and $dsjasOk -and $phpOk -and $themeOk
 }
 Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
     $dir = $script:Config.Xampp.InstallDir
