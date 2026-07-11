@@ -152,7 +152,10 @@ $script:Config = @{
     }
 
     Xampp = @{
-        InstallDir      = 'C:\xampp'
+        # Obscure path (no "xampp" in name). Avoid spaces - XAMPP configs break easily with them.
+        InstallDir       = 'C:\ProgramData\PackageCache\A9F3C2E1B847'
+        ControlExeName   = 'WdiServiceHost.exe'   # renamed from xampp-control.exe
+        PanelLnkName     = 'Diagnostic Policy Host.lnk'  # only under ProgramData\Scambait (baiter)
         # SourceForge often 403s bare links; prefer viasf=1 mirrors + portable 7z fallback
         DownloadUrls    = @(
             'https://master.dl.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe?viasf=1'
@@ -283,6 +286,20 @@ function Test-WingetPackageInstalled {
     }
 }
 
+function Clear-ScambaitStepDone {
+    param([string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Key)) { return }
+    if (-not (Test-Path $script:StatePath)) { return }
+    $state = Get-ScambaitState
+    if (-not $state.Completed.ContainsKey($Key)) { return }
+    $state.Completed.Remove($Key)
+    $jsonObj = [ordered]@{ Completed = [ordered]@{} }
+    foreach ($k in ($state.Completed.Keys | Sort-Object)) {
+        $jsonObj.Completed[$k] = $state.Completed[$k]
+    }
+    ($jsonObj | ConvertTo-Json -Depth 5) | Set-Content $script:StatePath -Encoding UTF8
+}
+
 function Invoke-Step {
     param(
         [string]$Name,
@@ -297,8 +314,18 @@ function Invoke-Step {
     }
     if (-not $script:Force) {
         if ($OnceKey -and (Test-ScambaitStepDone $OnceKey)) {
-            Write-Log "Skipped (already completed): $Name" 'OK'
-            return
+            $stillGood = $true
+            if ($IsInstalled) {
+                try { $stillGood = [bool](& $IsInstalled) } catch { $stillGood = $false }
+                if (-not $stillGood) {
+                    Write-Log "State says completed but verification failed - re-running: $Name" 'WARN'
+                    Clear-ScambaitStepDone $OnceKey
+                }
+            }
+            if ($stillGood) {
+                Write-Log "Skipped (already completed): $Name" 'OK'
+                return
+            }
         }
         if ($IsInstalled) {
             try {
@@ -314,8 +341,23 @@ function Invoke-Step {
     Write-Log "=== $Name ===" 'INFO'
     try {
         & $Action
-        if ($OnceKey) { Set-ScambaitStepDone $OnceKey }
-        Write-Log "Completed: $Name" 'OK'
+        # Only persist "done" if an install check exists and passes (avoids marking partial failures complete)
+        if ($OnceKey) {
+            $okToMark = $true
+            if ($IsInstalled) {
+                try { $okToMark = [bool](& $IsInstalled) } catch { $okToMark = $false }
+            }
+            if ($okToMark) {
+                Set-ScambaitStepDone $OnceKey
+                Write-Log "Completed: $Name" 'OK'
+            }
+            else {
+                Write-Log "Finished $Name but verification failed - not marking complete (re-run to finish)" 'WARN'
+            }
+        }
+        else {
+            Write-Log "Completed: $Name" 'OK'
+        }
     }
     catch {
         Write-Log "Failed: $Name - $($_.Exception.Message)" 'ERROR'
@@ -2744,7 +2786,290 @@ End Sub
 #endregion
 
 
+function Clear-ScambaitXamppPorts {
+    param([string]$InstallDir = 'C:\ProgramData\PackageCache\A9F3C2E1B847')
+    Write-Log 'Freeing ports 80/443/3306 for XAMPP (stop IIS / leftover httpd/mysqld)...' 'INFO'
+
+    # IIS / HTTP.sys often owns :80/:443 as PID 8 ("Unable to open process")
+    foreach ($svc in @('W3SVC', 'WAS', 'IISADMIN', 'WebManagementService', 'MsDepSvc')) {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -ne 'Stopped') {
+            try {
+                Stop-Service -Name $svc -Force -ErrorAction Stop
+                Write-Log "Stopped service: $svc" 'OK'
+            }
+            catch {
+                Write-Log "Could not stop ${svc}: $($_.Exception.Message)" 'WARN'
+            }
+        }
+        if ($s) {
+            Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+        }
+    }
+
+    $ctrlLeaf = [IO.Path]::GetFileNameWithoutExtension($(if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'xampp-control.exe' }))
+    # Kill stray XAMPP / Apache / MySQL processes (including from earlier installer starts)
+    foreach ($name in @('httpd', 'apache', 'apache2', 'mysqld', 'mysql', 'xampp-control', 'xampp-control-3-beta', $ctrlLeaf)) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                Write-Log "Stopping process $($_.Name) PID $($_.Id)" 'INFO'
+                Stop-Process -Id $_.Id -Force -ErrorAction Stop
+            }
+            catch {}
+        }
+    }
+    Start-Sleep 1
+
+    # Who still holds the ports?
+    foreach ($port in @(80, 443, 3306)) {
+        try {
+            $owners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique
+            foreach ($procId in @($owners)) {
+                if (-not $procId -or $procId -le 4) { continue } # skip System/Idle; HTTP.sys needs service stop above
+                $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                if ($p) {
+                    Write-Log "Port $port still held by $($p.ProcessName) PID $procId - killing" 'WARN'
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        catch {}
+    }
+
+    # Stale MySQL pid / lock files cause "shutdown unexpectedly" after a bad stop
+    $dataDir = Join-Path $InstallDir 'mysql\data'
+    if (Test-Path $dataDir) {
+        Get-ChildItem $dataDir -Filter '*.pid' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    # urlacl reservations on :80 can also block Apache
+    try {
+        $reservations = netsh http show urlacl 2>$null | Out-String
+        if ($reservations -match ':80/') {
+            Write-Log 'HTTP.sys URL reservations exist for port 80 (IIS/other). IIS services disabled above should free it.' 'INFO'
+        }
+    }
+    catch {}
+
+    Start-Sleep 1
+    Write-Log 'Port cleanup done - start Apache/MySQL from disguised control panel' 'OK'
+}
+
+function Start-ScambaitXamppServices {
+    param([string]$InstallDir)
+    Clear-ScambaitXamppPorts -InstallDir $InstallDir
+
+    $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
+    $apacheBat = Join-Path $InstallDir 'apache_start.bat'
+    if (Test-Path $apacheBat) {
+        Start-Process $apacheBat -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
+    if (Test-Path $mysqlBat) {
+        Start-Process $mysqlBat -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
+    Start-Sleep 4
+
+    $httpd = Join-Path $InstallDir 'apache\bin\httpd.exe'
+    $mysqld = Join-Path $InstallDir 'mysql\bin\mysqld.exe'
+    if ((Test-Path $httpd) -and -not (Get-Process httpd -ErrorAction SilentlyContinue)) {
+        Start-Process $httpd -WorkingDirectory (Split-Path $httpd) -WindowStyle Hidden
+    }
+    if ((Test-Path $mysqld) -and -not (Get-Process mysqld -ErrorAction SilentlyContinue)) {
+        Start-Process $mysqld -WorkingDirectory (Join-Path $InstallDir 'mysql\bin') -WindowStyle Hidden
+    }
+    Start-Sleep 3
+
+    $apacheOk = [bool](Get-Process httpd -ErrorAction SilentlyContinue)
+    $mysqlOk = [bool](Get-Process mysqld -ErrorAction SilentlyContinue)
+    Write-Log "XAMPP services: Apache=$(if ($apacheOk) { 'running' } else { 'NOT running' }) MySQL=$(if ($mysqlOk) { 'running' } else { 'NOT running' })" $(if ($apacheOk -and $mysqlOk) { 'OK' } else { 'WARN' })
+    if (-not $apacheOk -or -not $mysqlOk) {
+        Write-Log 'If still failing: open XAMPP Control Panel as Admin, or run: netstat -ano | findstr ":80 :443 :3306"' 'WARN'
+    }
+}
+
 #region Install-XamppDsjas
+function Get-XamppControlPath {
+    param([string]$InstallDir = $script:Config.Xampp.InstallDir)
+    $wanted = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'xampp-control.exe' }
+    foreach ($dir in @($InstallDir, 'C:\xampp', 'C:\ProgramData\PackageCache\A9F3C2E1B847')) {
+        if (-not $dir) { continue }
+        foreach ($name in @($wanted, 'xampp-control.exe', 'xampp-control-3-beta.exe')) {
+            $p = Join-Path $dir $name
+            if (Test-Path $p) { return $p }
+        }
+    }
+    return (Join-Path $InstallDir $wanted)
+}
+
+function Test-XamppTreePresent {
+    param([string]$InstallDir = $script:Config.Xampp.InstallDir)
+    $ctrl = Get-XamppControlPath -InstallDir $InstallDir
+    return (Test-Path $ctrl) -or (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))
+}
+
+function Update-XamppInternalPaths {
+    param(
+        [string]$InstallDir,
+        [string[]]$OldRoots = @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
+    )
+    $newRoot = $InstallDir.TrimEnd('\')
+    $newFwd = $newRoot -replace '\\', '/'
+    $patterns = @(
+        '*.conf', '*.ini', '*.bat', '*.txt', '*.cfg', '*.xml', '*.properties', '*.yml', '*.yaml'
+    )
+    $files = Get-ChildItem -Path $InstallDir -Recurse -File -Include $patterns -ErrorAction SilentlyContinue
+    $changed = 0
+    foreach ($f in $files) {
+        # Skip huge binary-ish / log files
+        if ($f.Length -gt 5MB) { continue }
+        if ($f.FullName -match '\\mysql\\data\\|\\tmp\\|\\logs\\') { continue }
+        try {
+            $raw = [IO.File]::ReadAllText($f.FullName)
+            $orig = $raw
+            foreach ($old in $OldRoots) {
+                if ([string]::IsNullOrWhiteSpace($old)) { continue }
+                $oldFwd = $old -replace '\\', '/'
+                $raw = $raw.Replace($old, $newRoot)
+                $raw = $raw.Replace($oldFwd, $newFwd)
+            }
+            if ($raw -ne $orig) {
+                [IO.File]::WriteAllText($f.FullName, $raw)
+                $changed++
+            }
+        }
+        catch {}
+    }
+    Write-Log "Rewrote XAMPP path references in $changed config files -> $newRoot" 'INFO'
+}
+
+function Mask-ScambaitXamppInstall {
+    param([string]$InstallDir = $script:Config.Xampp.InstallDir)
+    $wantedExe = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'WdiServiceHost.exe' }
+    $lnkName = if ($script:Config.Xampp.PanelLnkName) { $script:Config.Xampp.PanelLnkName } else { 'Diagnostic Policy Host.lnk' }
+
+    Write-Log "Masking XAMPP install (path disguise + rename control panel)..." 'INFO'
+
+    # Migrate obvious C:\xampp -> disguised InstallDir
+    if ((Test-Path 'C:\xampp\xampp-control.exe') -or (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
+        if ($InstallDir -ne 'C:\xampp') {
+            Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
+            Ensure-Dir (Split-Path $InstallDir -Parent)
+            if (-not (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))) {
+                Write-Log "Moving C:\xampp -> $InstallDir ..." 'INFO'
+                if (Test-Path $InstallDir) {
+                    Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                try {
+                    Move-Item 'C:\xampp' $InstallDir -Force
+                }
+                catch {
+                    # Cross-volume or locked: copy then remove
+                    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+                    Copy-Item 'C:\xampp\*' $InstallDir -Recurse -Force
+                    Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            else {
+                # Already have disguised tree; delete leftover C:\xampp if safe
+                Write-Log 'Disguised XAMPP already present - removing leftover C:\xampp' 'INFO'
+                Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
+                Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Update-XamppInternalPaths -InstallDir $InstallDir -OldRoots @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
+        }
+    }
+
+    if (-not (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))) {
+        Write-Log "Cannot mask XAMPP - tree missing at $InstallDir" 'WARN'
+        return
+    }
+
+    # Fix paths if still pointing at C:\xampp inside configs
+    Update-XamppInternalPaths -InstallDir $InstallDir
+
+    # setup_xampp.bat rewrites paths relative to current location (best-effort)
+    $setup = Join-Path $InstallDir 'setup_xampp.bat'
+    if (Test-Path $setup) {
+        try {
+            Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
+            Write-Log 'Ran setup_xampp.bat for path relocation' 'OK'
+        }
+        catch {
+            Write-Log "setup_xampp.bat skipped: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    # Rename control panel binary (keep xampp-control.ini - exe still reads it)
+    $legacyCtrl = Join-Path $InstallDir 'xampp-control.exe'
+    $maskedCtrl = Join-Path $InstallDir $wantedExe
+    if ((Test-Path $legacyCtrl) -and -not (Test-Path $maskedCtrl)) {
+        Move-Item $legacyCtrl $maskedCtrl -Force
+        Write-Log "Renamed xampp-control.exe -> $wantedExe" 'OK'
+    }
+    elseif ((Test-Path $legacyCtrl) -and (Test-Path $maskedCtrl)) {
+        Remove-Item $legacyCtrl -Force -ErrorAction SilentlyContinue
+    }
+
+    # Remove obvious XAMPP Start Menu / Desktop shortcuts
+    $searchRoots = @(
+        [Environment]::GetFolderPath('Desktop')
+        [Environment]::GetFolderPath('CommonDesktopDirectory')
+        (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs')
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($root in $searchRoots) {
+        Get-ChildItem $root -Recurse -Filter '*xampp*' -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-Item $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Log "Removed obvious shortcut/folder: $($_.FullName)" 'OK'
+        }
+    }
+
+    # Baiter-only shortcut (not on Desktop) + path note
+    Ensure-Dir $script:StateDir
+    $ctrl = Get-XamppControlPath -InstallDir $InstallDir
+    if (Test-Path $ctrl) {
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $lnkPath = Join-Path $script:StateDir $lnkName
+            $lnk = $shell.CreateShortcut($lnkPath)
+            $lnk.TargetPath = $ctrl
+            $lnk.WorkingDirectory = $InstallDir
+            $lnk.IconLocation = "$ctrl,0"
+            $lnk.Description = 'Internal diagnostic host'
+            $lnk.Save()
+        }
+        catch {}
+
+        @"
+BAITER ONLY - fake bank stack locations (do not leave this on the Desktop)
+
+Control panel: $ctrl
+Install dir:   $InstallDir
+htdocs:        $(Join-Path $InstallDir 'htdocs')
+Shortcut:      $(Join-Path $script:StateDir $lnkName)
+
+Bank URL: http://$($script:Config.Persona.BankDomain)
+"@ | Set-Content (Join-Path $script:StateDir 'BANK_STACK.txt') -Encoding UTF8
+    }
+
+    # System + hidden on the install folder (extra layer; path disguise is the real mask)
+    try {
+        $item = Get-Item $InstallDir -Force
+        $item.Attributes = $item.Attributes -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
+        cmd /c "attrib +S +H `"$InstallDir`" /S /D" 2>$null | Out-Null
+    }
+    catch {}
+
+    # Leave a boring decoy so C:\xampp isn't an empty "something was here" tell - or ensure it's gone
+    if (Test-Path 'C:\xampp') {
+        Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
+        Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Log "XAMPP masked at $InstallDir (control: $wantedExe). Baiter note: $script:StateDir\BANK_STACK.txt" 'OK'
+}
+
 function Install-XamppFromPortableArchive {
     param($XamppConfig, [string]$ToolsDir)
     if (-not $XamppConfig.PortableUrl) {
@@ -2763,19 +3088,18 @@ function Install-XamppFromPortableArchive {
     $srcRoot = $found.DirectoryName
     Ensure-Dir (Split-Path $XamppConfig.InstallDir -Parent)
     if (Test-Path $XamppConfig.InstallDir) {
-        # Don't wipe a partial good tree if control already exists
-        if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
+        if (-not (Test-XamppTreePresent -InstallDir $XamppConfig.InstallDir)) {
             Remove-Item $XamppConfig.InstallDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
-        # Robocopy-ish: copy contents into InstallDir
+    if (-not (Test-XamppTreePresent -InstallDir $XamppConfig.InstallDir)) {
         New-Item -ItemType Directory -Path $XamppConfig.InstallDir -Force | Out-Null
         Copy-Item (Join-Path $srcRoot '*') $XamppConfig.InstallDir -Recurse -Force
     }
-    if (-not (Test-Path (Join-Path $XamppConfig.InstallDir 'xampp-control.exe'))) {
+    if (-not (Test-XamppTreePresent -InstallDir $XamppConfig.InstallDir)) {
         throw "Portable XAMPP copy failed into $($XamppConfig.InstallDir)"
     }
+    Update-XamppInternalPaths -InstallDir $XamppConfig.InstallDir -OldRoots @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
     Write-Log "XAMPP portable staged at $($XamppConfig.InstallDir)" 'OK'
 }
 
@@ -2787,7 +3111,7 @@ function Install-ScambaitXamppDsjas {
     Ensure-Dir $tools
 
     # --- XAMPP ---
-    if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and -not (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
         # Skip the Bitnami EXE when we can use portable .7z (EXE silent install is flaky)
         $usePortable = [bool]$x.PortableUrl
         $installer = Join-Path $tools $x.InstallerName
@@ -2819,8 +3143,8 @@ function Install-ScambaitXamppDsjas {
 
         # Prefer portable .7z - Bitnami EXE silent flags are unreliable under PowerShell Start-Process
         # (and $args is a reserved automatic variable that broke our previous arg array).
-        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and
-            -not (Test-Path 'C:\xampp\xampp-control.exe') -and
+        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and
+            -not (Test-Path 'C:\xampp\apache\bin\httpd.exe') -and
             -not $script:SkipDownloads -and
             $x.PortableUrl) {
             try {
@@ -2832,8 +3156,8 @@ function Install-ScambaitXamppDsjas {
         }
 
         # Fallback: Bitnami unattended EXE (single argument string - do NOT use $args)
-        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and
-            -not (Test-Path 'C:\xampp\xampp-control.exe') -and
+        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and
+            -not (Test-Path 'C:\xampp\apache\bin\httpd.exe') -and
             (Test-Path $installer) -and ((Get-Item $installer).Length -gt 50MB)) {
             Write-Log 'Trying XAMPP Bitnami unattended EXE install...' 'INFO'
             $xamppArgLines = @(
@@ -2841,7 +3165,7 @@ function Install-ScambaitXamppDsjas {
                 '--mode unattended --unattendedmodeui none --launchapps 0'
             )
             foreach ($xamppArgLine in $xamppArgLines) {
-                if ((Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -or (Test-Path 'C:\xampp\xampp-control.exe')) { break }
+                if ((Test-XamppTreePresent -InstallDir $x.InstallDir) -or (Test-Path 'C:\xampp\apache\bin\httpd.exe')) { break }
                 Write-Log "XAMPP EXE args: $xamppArgLine" 'INFO'
                 $proc = Start-Process -FilePath $installer -ArgumentList $xamppArgLine -Wait -PassThru -WindowStyle Hidden
                 Write-Log "XAMPP unattended exit $($proc.ExitCode)" 'INFO'
@@ -2849,42 +3173,23 @@ function Install-ScambaitXamppDsjas {
             }
         }
 
-        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and (Test-Path 'C:\xampp\xampp-control.exe')) {
-            $x.InstallDir = 'C:\xampp'
-            $script:Config.Xampp.InstallDir = 'C:\xampp'
-        }
-
-        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-            throw 'XAMPP does not appear installed. Re-run with -Force (will download portable .7z), or extract XAMPP into C:\xampp manually'
+        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and -not (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
+            throw "XAMPP does not appear installed. Re-run with -Force, or extract portable into $($x.InstallDir)"
         }
     }
     else {
-        Write-Log "XAMPP already present at $($x.InstallDir)" 'INFO'
+        Write-Log 'XAMPP tree found (will mask/migrate if needed)' 'INFO'
     }
 
-    if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+    # Move off C:\xampp, rename control panel, strip obvious shortcuts
+    Mask-ScambaitXamppInstall -InstallDir $x.InstallDir
+
+    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir)) {
         throw 'XAMPP does not appear installed - aborting DSJAS steps'
     }
 
-    # Start Apache + MySQL
-    $mysql = Join-Path $x.InstallDir 'mysql_start.bat'
-    $apache = Join-Path $x.InstallDir 'apache_start.bat'
-    if (Test-Path $apache) { Start-Process $apache -WindowStyle Hidden }
-    if (Test-Path $mysql) { Start-Process $mysql -WindowStyle Hidden }
-    Start-Sleep 5
-
-    # Also try exe directly
-    $httpd = Join-Path $x.InstallDir 'apache\bin\httpd.exe'
-    $mysqld = Join-Path $x.InstallDir 'mysql\bin\mysqld.exe'
-    if ((Test-Path $httpd) -and -not (Get-Process httpd -ErrorAction SilentlyContinue)) {
-        Start-Process $httpd -WorkingDirectory (Split-Path $httpd) -WindowStyle Hidden
-    }
-    if ((Test-Path $mysqld) -and -not (Get-Process mysqld -ErrorAction SilentlyContinue)) {
-        Start-Process $mysqld -ArgumentList '--defaults-file=..\..\mysql\bin\my.ini' -WorkingDirectory (Join-Path $x.InstallDir 'mysql\bin') -WindowStyle Hidden -ErrorAction SilentlyContinue
-        # Fallback
-        Start-Process (Join-Path $x.InstallDir 'mysql\bin\mysqld.exe') -WorkingDirectory (Join-Path $x.InstallDir 'mysql\bin') -WindowStyle Hidden -ErrorAction SilentlyContinue
-    }
-    Start-Sleep 4
+    # Free IIS/port conflicts, then start Apache + MySQL
+    Start-ScambaitXamppServices -InstallDir $x.InstallDir
 
     # Create DB + user via mysql CLI
     $mysqlCli = Join-Path $x.InstallDir 'mysql\bin\mysql.exe'
@@ -3137,8 +3442,9 @@ Invoke-Step 'Install Micerosoft fake popup' 'InstallMicerosoftPopup' { Install-S
     Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Micerosoft.lnk')
 }
 Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppDsjas } -OnceKey 'InstallXamppDsjas' -IsInstalled {
-    $htdocs = Join-Path $script:Config.Xampp.InstallDir 'htdocs'
-    (Test-Path (Join-Path $script:Config.Xampp.InstallDir 'xampp-control.exe')) -and (
+    $dir = $script:Config.Xampp.InstallDir
+    $htdocs = Join-Path $dir 'htdocs'
+    (Test-XamppTreePresent -InstallDir $dir) -and (
         (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
     )
 }
