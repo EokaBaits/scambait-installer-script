@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 #Requires -Version 5.1
 # One-file scambait setup for a Windows 10 VM on Proxmox VE.
 # Edit the $Config block below, then run as Administrator:
@@ -77,8 +77,8 @@ $script:Config = @{
         InstallDir   = 'C:\Program Files\HP\HP Image Foundation'
         VideoFile    = 'assets\camera\webcam_loop.mp4'
         TaskName     = 'HP Image Foundation'
-        # Unity Capture registers a custom-named DirectShow cam; pyvirtualcam feeds it headlessly
-        UnityCaptureApi = 'https://api.github.com/repos/schellingb/UnityCapture/releases/latest'
+        # Unity Capture has no GitHub Releases - use master zip (Install\Install.bat)
+        UnityCaptureZip = 'https://github.com/schellingb/UnityCapture/archive/refs/heads/master.zip'
     }
 
     # If assets\ is missing (script-only copy), download these from your GitHub repo.
@@ -105,8 +105,8 @@ $script:Config = @{
         @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player' }
         @{ Id = 'RARLab.WinRAR'; Name = 'WinRAR' }
         @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
-        @{ Id = 'Skype.Desktop'; Name = 'Skype'; DownloadUrl = 'https://go.skype.com/windows.desktop.download'; InstallerName = 'SkypeSetup.exe' }
-        @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner' }
+        @{ Id = 'Microsoft.Skype'; Name = 'Skype' }
+        @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner'; DownloadUrl = 'https://download.ccleaner.com/ccsetup.exe'; InstallerName = 'ccsetup.exe'; SilentArgs = '/S' }
         @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes' }
         @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice' }
         @{ Id = 'Dropbox.Dropbox'; Name = 'Dropbox' }
@@ -153,9 +153,13 @@ $script:Config = @{
 
     Xampp = @{
         InstallDir      = 'C:\xampp'
-        # Prefer direct SourceForge CDN (avoids HTML interstitial from /download pages)
-        DownloadUrl     = 'https://downloads.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe'
-        DownloadUrlAlt  = 'https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download'
+        # SourceForge often 403s bare links; prefer viasf=1 mirrors + portable 7z fallback
+        DownloadUrls    = @(
+            'https://master.dl.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe?viasf=1'
+            'https://downloads.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe?viasf=1'
+            'https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16-installer.exe/download'
+        )
+        PortableUrl     = 'https://master.dl.sourceforge.net/project/xampp/XAMPP%20Windows/8.2.12/xampp-windows-x64-8.2.12-0-VS16.7z?viasf=1'
         InstallerName   = 'xampp-installer.exe'
         MinBytes        = 100000000
         DsjasReleaseApi = 'https://api.github.com/repos/DSJAS/DSJAS/releases/latest'
@@ -415,7 +419,7 @@ function Download-File {
     param(
         [string]$Url,
         [string]$OutFile,
-        [string]$UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        [string]$UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         [long]$MinBytes = 0
     )
     Ensure-Dir (Split-Path $OutFile -Parent)
@@ -423,10 +427,39 @@ function Download-File {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $oldProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
+    $headers = @{
+        'User-Agent' = $UserAgent
+        'Accept'     = '*/*'
+    }
+    if ($Url -match 'sourceforge\.net') {
+        $headers['Referer'] = 'https://sourceforge.net/'
+    }
     try {
-        # Remove prior bad/partial download
         if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UserAgent $UserAgent -UseBasicParsing -MaximumRedirection 10
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $headers -UseBasicParsing -MaximumRedirection 10
+        }
+        catch {
+            # curl.exe often succeeds where IWR gets 403 from SourceForge/CDN
+            $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+            if (-not $curl) { throw }
+            Write-Log "IWR failed ($($_.Exception.Message)); retrying with curl.exe..." 'WARN'
+            if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+            $curlArgs = @(
+                '-L', '--fail', '--retry', '3',
+                '-A', $UserAgent,
+                '-H', 'Accept: */*',
+                '-o', $OutFile,
+                $Url
+            )
+            if ($Url -match 'sourceforge\.net') {
+                $curlArgs = @('-L', '--fail', '--retry', '3', '-A', $UserAgent, '-e', 'https://sourceforge.net/', '-o', $OutFile, $Url)
+            }
+            & curl.exe @curlArgs
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutFile)) {
+                throw "curl download failed (exit $LASTEXITCODE): $Url"
+            }
+        }
     }
     finally {
         $ProgressPreference = $oldProgress
@@ -434,12 +467,10 @@ function Download-File {
     if (-not (Test-Path $OutFile)) { throw "Download failed: $Url" }
     $len = (Get-Item $OutFile).Length
     if ($MinBytes -gt 0 -and $len -lt $MinBytes) {
-        # SourceForge often returns a tiny HTML interstitial instead of the binary
         $head = Get-Content $OutFile -TotalCount 5 -ErrorAction SilentlyContinue | Out-String
         Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
         throw "Download too small ($len bytes, need >= $MinBytes). Likely HTML interstitial. Head: $($head.Substring(0, [Math]::Min(120, $head.Length)))"
     }
-    # Reject obvious HTML error pages saved as .exe/.zip
     $fs = [IO.File]::OpenRead($OutFile)
     try {
         $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte()
@@ -462,61 +493,71 @@ function Download-File {
 }
 
 function Get-SevenZip {
+    # Always prefer real 7-Zip. WinRAR's UnRAR cannot extract .7z and often leaves broken partial extracts for GitHub zips.
     $cands = @(
         "${env:ProgramFiles}\7-Zip\7z.exe"
         "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
-        "${env:ProgramFiles}\WinRAR\UnRAR.exe"
-        "${env:ProgramFiles}\WinRAR\WinRAR.exe"
-        "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe"
     )
     foreach ($c in $cands) { if (Test-Path $c) { return $c } }
+
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Log 'Installing 7-Zip for archive extraction...' 'INFO'
+        Write-Log 'Installing 7-Zip (required for .7z / GitHub release archives)...' 'INFO'
         winget install --id 7zip.7zip -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
-        foreach ($c in @("${env:ProgramFiles}\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
-            if (Test-Path $c) { return $c }
+        Start-Sleep 2
+        foreach ($c in $cands) { if (Test-Path $c) { return $c } }
+    }
+
+    # Last resort: portable 7zr.exe (decode-only) from 7-zip.org
+    $tools = Get-AssetPath $script:Config.Paths.Tools
+    Ensure-Dir $tools
+    $portable = Join-Path $tools '7zr.exe'
+    if (-not (Test-Path $portable)) {
+        try {
+            Write-Log 'Downloading portable 7zr.exe...' 'INFO'
+            Download-File -Url 'https://www.7-zip.org/a/7zr.exe' -OutFile $portable -MinBytes 100000
+        }
+        catch {
+            Write-Log "Portable 7zr download failed: $($_.Exception.Message)" 'WARN'
         }
     }
+    if (Test-Path $portable) { return $portable }
     return $null
 }
 
 function Expand-ArchiveSafe {
     param([string]$Archive, [string]$Dest)
     if (-not (Test-Path $Archive)) { throw "Archive missing: $Archive" }
+    if (Test-Path $Dest) { Remove-Item $Dest -Recurse -Force -ErrorAction SilentlyContinue }
     Ensure-Dir $Dest
     $ext = [IO.Path]::GetExtension($Archive).ToLowerInvariant()
 
-    # Prefer 7-Zip/WinRAR for .7z and for zips that use unsupported methods (LZMA/Deflate64)
     $seven = Get-SevenZip
+    if (-not $seven -and $ext -eq '.7z') {
+        throw '7-Zip is required to extract .7z archives. Install 7-Zip and re-run.'
+    }
+
     if ($seven) {
         Write-Log "Extracting with $(Split-Path $seven -Leaf)..." 'INFO'
-        if ($seven -match 'UnRAR\.exe$') {
-            & $seven x -y -o"$Dest" -- $Archive | Out-Null
-        }
-        elseif ($seven -match 'WinRAR\.exe$') {
-            & $seven x -y -o"$Dest" -- $Archive | Out-Null
-        }
-        else {
-            & $seven x -y "-o$Dest" -- $Archive | Out-Null
-        }
-        $any = Get-ChildItem $Dest -Force -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($any) { return }
+        $p = Start-Process -FilePath $seven -ArgumentList @('x', '-y', "-o$Dest", '--', $Archive) -Wait -PassThru -WindowStyle Hidden
+        $files = Get-ChildItem $Dest -Recurse -File -ErrorAction SilentlyContinue
+        if ($files -and $files.Count -gt 0) { return }
+        Write-Log "7-Zip extract produced no files (exit $($p.ExitCode))" 'WARN'
     }
 
     if ($ext -eq '.zip') {
         try {
             Expand-Archive -Path $Archive -DestinationPath $Dest -Force -ErrorAction Stop
-            return
+            $files = Get-ChildItem $Dest -Recurse -File -ErrorAction SilentlyContinue
+            if ($files -and $files.Count -gt 0) { return }
         }
         catch {
             Write-Log "Expand-Archive failed ($($_.Exception.Message)); need 7-Zip for this zip" 'WARN'
         }
-        # Windows tar can extract some zips
         $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
         if ($tar) {
             & tar.exe -xf $Archive -C $Dest 2>$null
-            $any = Get-ChildItem $Dest -Force -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($any) { return }
+            $files = Get-ChildItem $Dest -Recurse -File -ErrorAction SilentlyContinue
+            if ($files -and $files.Count -gt 0) { return }
         }
     }
 
@@ -1082,32 +1123,38 @@ The feeder runs hidden at logon as '$taskName' and exposes device '$deviceName'.
     $unityOk = $false
     try {
         if (-not $script:SkipDownloads) {
-            $asset = Get-GithubLatestAsset -ApiUrl $cam.UnityCaptureApi -NameMatch '\.zip$'
-            $zip = Join-Path $script:WorkDir $asset.Name
+            $zipUrl = if ($cam.UnityCaptureZip) { $cam.UnityCaptureZip } else { 'https://github.com/schellingb/UnityCapture/archive/refs/heads/master.zip' }
+            $zip = Join-Path $script:WorkDir 'UnityCapture-master.zip'
             if ($script:Force -or -not (Test-Path $zip)) {
-                Download-File -Url $asset.Url -OutFile $zip
+                Download-File -Url $zipUrl -OutFile $zip -MinBytes 100000
             }
-            if (Test-Path $unityDir) { Remove-Item $unityDir -Recurse -Force -ErrorAction SilentlyContinue }
-            Expand-ZipSafe -Zip $zip -Dest $unityDir
+            Expand-ArchiveSafe -Archive $zip -Dest $unityDir
         }
-        $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' -ErrorAction SilentlyContinue |
+            Where-Object { $_.DirectoryName -match '\\Install$' } |
+            Select-Object -First 1
         if (-not $installBat) {
-            # Some releases nest under Installer\
-            $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' | Select-Object -First 1
+            $installBat = Get-ChildItem $unityDir -Recurse -Filter 'Install.bat' -ErrorAction SilentlyContinue | Select-Object -First 1
         }
         if ($installBat) {
             Write-Log "Installing Unity Capture as '$deviceName'..." 'INFO'
-            Push-Location $installBat.DirectoryName
+            # Persist under Program Files so the filter DLLs are not deleted with TEMP
+            $persist = Join-Path ${env:ProgramFiles} 'HP\HP Image Foundation\UnityCapture'
+            Ensure-Dir $persist
+            Copy-Item (Join-Path $installBat.DirectoryName '*') $persist -Recurse -Force
+            $persistBat = Join-Path $persist 'Install.bat'
+            if (-not (Test-Path $persistBat)) { $persistBat = $installBat.FullName; $persist = $installBat.DirectoryName }
+            Push-Location $persist
             try {
-                # Install.bat "Device Name" registers a DirectShow cam with that friendly name
-                $p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$($installBat.FullName)`" `"$deviceName`"" -Wait -PassThru -WindowStyle Hidden
+                # Install.bat [DeviceName] registers a DirectShow cam with that friendly name when supported
+                $p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$persistBat`" `"$deviceName`"" -Wait -PassThru -WindowStyle Hidden
                 Write-Log "Unity Capture installer exit $($p.ExitCode)" 'INFO'
                 $unityOk = $true
             }
             finally { Pop-Location }
         }
         else {
-            Write-Log 'Unity Capture Install.bat not found in release zip' 'WARN'
+            Write-Log 'Unity Capture Install.bat not found in zip' 'WARN'
         }
     }
     catch {
@@ -1353,6 +1400,33 @@ function Install-ScambaitPrograms {
             Out-String
         if ($LASTEXITCODE -eq 0 -or $out -match 'already installed|No available upgrade|successfully installed') {
             Write-Log "OK: $($pkg.Name)" 'OK'
+        }
+        elseif ($out -match 'Installer hash does not match') {
+            Write-Log "winget hash mismatch for $($pkg.Name); retrying with --ignore-security-hash..." 'WARN'
+            $out2 = winget install --id $pkg.Id -e --accept-source-agreements --accept-package-agreements --silent --ignore-security-hash 2>&1 |
+                Out-String
+            if ($LASTEXITCODE -eq 0 -or $out2 -match 'successfully installed|already installed') {
+                Write-Log "OK: $($pkg.Name) (hash ignored)" 'OK'
+            }
+            elseif ($pkg.DownloadUrl) {
+                Write-Log "winget still failed for $($pkg.Name); trying direct download..." 'WARN'
+                $tools = Get-AssetPath $script:Config.Paths.Tools
+                Ensure-Dir $tools
+                $installerName = if ($pkg.InstallerName) { $pkg.InstallerName } else { 'setup.exe' }
+                $installer = Join-Path $tools $installerName
+                try {
+                    Download-File -Url $pkg.DownloadUrl -OutFile $installer
+                    $args = if ($pkg.SilentArgs) { $pkg.SilentArgs } else { '/S' }
+                    Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru | Out-Null
+                    Write-Log "OK: $($pkg.Name) (direct)" 'OK'
+                }
+                catch {
+                    Write-Log "Direct install failed for $($pkg.Name): $($_.Exception.Message)" 'ERROR'
+                }
+            }
+            else {
+                Write-Log "winget issue for $($pkg.Name): $out2" 'WARN'
+            }
         }
         else {
             Write-Log "winget issue for $($pkg.Name): $out" 'WARN'
@@ -2386,15 +2460,21 @@ function Install-ScambaitFuckScreenConnect {
     Ensure-Dir $work
     Expand-ArchiveSafe -Archive $localZip.FullName -Dest $work
 
-    $installPs1 = Get-ChildItem $work -Recurse -Filter 'install.ps1' | Select-Object -First 1
+    $installPs1 = Get-ChildItem $work -Recurse -Filter 'install.ps1' |
+        Where-Object { $_.DirectoryName -notmatch 'install_modules' } |
+        Select-Object -First 1
     if ($installPs1) {
-        Write-Log "Running $($installPs1.FullName)" 'INFO'
-        Push-Location $installPs1.DirectoryName
-        try {
-            & $installPs1.FullName
+        $mods = Join-Path $installPs1.DirectoryName 'install_modules'
+        if (-not (Test-Path $mods)) {
+            throw "FuckScreenConnect extract incomplete (missing install_modules). Delete tools\FuckScreenConnect* and re-run with 7-Zip installed."
         }
-        finally {
-            Pop-Location
+        Write-Log "Running $($installPs1.FullName)" 'INFO'
+        # Fresh powershell.exe so #Requires / relative dot-sources in install.ps1 work reliably
+        $p = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installPs1.FullName
+        ) -WorkingDirectory $installPs1.DirectoryName -Wait -PassThru -WindowStyle Hidden
+        if ($p.ExitCode -ne 0) {
+            throw "FuckScreenConnect install.ps1 exited $($p.ExitCode). Open an admin PowerShell in $($installPs1.DirectoryName) and run .\install.ps1"
         }
         Write-Log 'FuckScreenConnect install script finished (runs as Windows service)' 'OK'
     }
@@ -2636,7 +2716,11 @@ function Install-ScambaitXamppDsjas {
 
         $needDownload = $script:Force -or -not (Test-Path $installer) -or ((Get-Item $installer -ErrorAction SilentlyContinue).Length -lt 50MB)
         if ($needDownload -and -not $script:SkipDownloads) {
-            $urls = @($x.DownloadUrl, $x.DownloadUrlAlt) | Where-Object { $_ } | Select-Object -Unique
+            $urls = @()
+            if ($x.DownloadUrls) { $urls += @($x.DownloadUrls) }
+            if ($x.DownloadUrl) { $urls += $x.DownloadUrl }
+            if ($x.DownloadUrlAlt) { $urls += $x.DownloadUrlAlt }
+            $urls = $urls | Where-Object { $_ } | Select-Object -Unique
             $min = if ($x.MinBytes) { [long]$x.MinBytes } else { 100000000 }
             $ok = $false
             foreach ($url in $urls) {
@@ -2649,20 +2733,45 @@ function Install-ScambaitXamppDsjas {
                     Write-Log "XAMPP URL failed: $($_.Exception.Message)" 'WARN'
                 }
             }
-            if (-not $ok) {
+
+            # Portable 7z fallback (no NSIS installer needed)
+            if (-not $ok -and $x.PortableUrl) {
+                try {
+                    Write-Log 'Trying XAMPP portable .7z fallback...' 'INFO'
+                    $portableArc = Join-Path $tools 'xampp-portable.7z'
+                    Download-File -Url $x.PortableUrl -OutFile $portableArc -MinBytes 50000000
+                    $extractTmp = Join-Path $script:WorkDir 'xampp-extract'
+                    Expand-ArchiveSafe -Archive $portableArc -Dest $extractTmp
+                    $found = Get-ChildItem $extractTmp -Recurse -Filter 'xampp-control.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if (-not $found) { throw 'Portable archive extracted but xampp-control.exe not found' }
+                    $srcRoot = $found.DirectoryName
+                    Ensure-Dir (Split-Path $x.InstallDir -Parent)
+                    if (Test-Path $x.InstallDir) { Remove-Item $x.InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+                    Copy-Item $srcRoot $x.InstallDir -Recurse -Force
+                    $ok = $true
+                    Write-Log "XAMPP portable staged at $($x.InstallDir)" 'OK'
+                }
+                catch {
+                    Write-Log "XAMPP portable fallback failed: $($_.Exception.Message)" 'WARN'
+                }
+            }
+
+            if (-not $ok -and -not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
                 throw 'XAMPP download failed from all mirrors. Manually download from https://www.apachefriends.org/ into the tools folder as xampp-installer.exe'
             }
         }
 
-        if (-not (Test-Path $installer) -or ((Get-Item $installer).Length -lt 50MB)) {
-            throw 'XAMPP installer missing or corrupt (too small). Place a real installer EXE in the tools folder.'
-        }
+        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+            if (-not (Test-Path $installer) -or ((Get-Item $installer).Length -lt 50MB)) {
+                throw 'XAMPP installer missing or corrupt (too small). Place a real installer EXE in the tools folder.'
+            }
 
-        Write-Log 'Running XAMPP silent-ish install (may show UI on some builds)...' 'INFO'
-        # XAMPP NSIS installer: /S silent, dir via /D=
-        $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$($x.InstallDir)" -Wait -PassThru
-        Write-Log "XAMPP installer exit code: $($p.ExitCode)" 'INFO'
-        Start-Sleep 3
+            Write-Log 'Running XAMPP silent-ish install (may show UI on some builds)...' 'INFO'
+            # XAMPP NSIS installer: /S silent, dir via /D=
+            $p = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$($x.InstallDir)" -Wait -PassThru
+            Write-Log "XAMPP installer exit code: $($p.ExitCode)" 'INFO'
+            Start-Sleep 3
+        }
     }
     else {
         Write-Log "XAMPP already present at $($x.InstallDir)" 'INFO'
