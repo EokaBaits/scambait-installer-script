@@ -1,30 +1,12 @@
 ﻿#Requires -RunAsAdministrator
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-    One-file scambait setup for a Windows 10 VM on Proxmox VE.
+# One-file scambait setup for a Windows 10 VM on Proxmox VE.
+# Edit the $Config block below, then run as Administrator:
+#   Set-ExecutionPolicy Bypass -Scope Process -Force
+#   .\Install-Scambait.ps1
+# Optional: -SkipDownloads
+# Host SMBIOS masking still must be applied on the Proxmox node (see Desktop readme).
 
-.DESCRIPTION
-    Best workflow: put this script + an assets\ folder in a GitHub repo, then on the VM:
-      git clone <your-repo>
-      cd <repo>
-      .\Install-Scambait.ps1
-
-    Or download only this script and set Assets.GitHub below so wallpapers/video
-    are pulled from raw.githubusercontent.com automatically.
-
-    Tools (Moo.*, XAMPP, DSJAS, winget apps) also download when online.
-
-    Still required on the Proxmox HOST (not this guest script):
-      host/proxmox-smbios.conf  -> apply smbios1 + kvm=off for this VMID
-
-.EXAMPLE
-    git clone https://github.com/YOU/scambait-installer.git
-    cd scambait-installer
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    .\Install-Scambait.ps1
-#>
-[CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$SkipDownloads
 )
@@ -212,10 +194,8 @@ function Invoke-Step {
     }
     Write-Log "=== $Name ===" 'INFO'
     try {
-        if ($PSCmdlet.ShouldProcess($Name)) {
-            & $Action
-            Write-Log "Completed: $Name" 'OK'
-        }
+        & $Action
+        Write-Log "Completed: $Name" 'OK'
     }
     catch {
         Write-Log "Failed: $Name - $($_.Exception.Message)" 'ERROR'
