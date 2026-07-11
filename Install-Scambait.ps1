@@ -3431,6 +3431,80 @@ function New-ScambaitBankCertificateFiles {
     }
 }
 
+function Import-ScambaitCertToTrustedRoot {
+    param(
+        [string]$CerPath,
+        [string]$CrtPath
+    )
+    $cert = $null
+    try {
+        if ($CerPath -and [IO.File]::Exists($CerPath)) {
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[IO.File]::ReadAllBytes($CerPath))
+        }
+        elseif ($CrtPath -and [IO.File]::Exists($CrtPath)) {
+            $raw = [IO.File]::ReadAllText($CrtPath)
+            if ($raw -match 'BEGIN CERTIFICATE') {
+                $b64 = [regex]::Replace($raw, '-----[^-]+-----', '') -replace '\s', ''
+                $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[Convert]::FromBase64String($b64))
+            }
+            else {
+                $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[IO.File]::ReadAllBytes($CrtPath))
+            }
+        }
+    }
+    catch {
+        Write-Log "Could not load bank cert for trust import: $($_.Exception.Message)" 'WARN'
+        return $false
+    }
+    if (-not $cert) { return $false }
+
+    try {
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
+            [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+            [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+        )
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        # Remove prior same-subject copies then add
+        $existing = $store.Certificates.Find(
+            [System.Security.Cryptography.X509Certificates.X509FindType]::FindBySubjectName,
+            $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false),
+            $false
+        )
+        foreach ($old in $existing) {
+            try { $store.Remove($old) } catch {}
+        }
+        $store.Add($cert)
+        $store.Close()
+        Write-Log "Bank SSL cert trusted in LocalMachine\\Root (thumbprint $($cert.Thumbprint))" 'OK'
+        return $true
+    }
+    catch {
+        Write-Log "X509Store Root import failed: $($_.Exception.Message)" 'WARN'
+    }
+
+    # Fallback: certutil from a path WITHOUT spaces (Package Cache breaks Start-Process arg parsing)
+    try {
+        $tmpCer = Join-Path $env:TEMP 'scambait-bank-root.cer'
+        if ($CerPath -and [IO.File]::Exists($CerPath)) {
+            Copy-Item -LiteralPath $CerPath -Destination $tmpCer -Force
+        }
+        else {
+            [IO.File]::WriteAllBytes($tmpCer, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        }
+        $p = Start-Process -FilePath "$env:SystemRoot\System32\certutil.exe" `
+            -ArgumentList @('-addstore', '-f', 'Root', $tmpCer) -Wait -PassThru -WindowStyle Hidden -NoNewWindow
+        if ($p.ExitCode -eq 0) {
+            Write-Log 'Bank SSL cert trusted via certutil (temp path)' 'OK'
+            return $true
+        }
+        Write-Log "certutil Root import exit $($p.ExitCode)" 'WARN'
+    }
+    catch {
+        Write-Log "certutil fallback failed: $($_.Exception.Message)" 'WARN'
+    }
+    return $false
+}
+
 function Get-ScambaitBankHostnames {
     $domain = $script:Config.Persona.BankDomain
     return @(
@@ -3442,10 +3516,21 @@ function Get-ScambaitBankHostnames {
 
 function Test-ScambaitBankSslReady {
     $dir = $script:Config.Xampp.InstallDir
+    $cer = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.cer'
     $crt = Join-Path $dir 'apache\conf\ssl.crt\scambait-bank.crt'
-    if (-not [IO.File]::Exists($crt)) { return $false }
+    $key = Join-Path $dir 'apache\conf\ssl.key\scambait-bank.key'
+    if (-not [IO.File]::Exists($key)) { return $false }
+    if (-not ([IO.File]::Exists($cer) -or [IO.File]::Exists($crt))) { return $false }
     try {
-        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crt)
+        $cert = $null
+        if ([IO.File]::Exists($cer)) {
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[IO.File]::ReadAllBytes($cer))
+        }
+        else {
+            $raw = [IO.File]::ReadAllText($crt)
+            $b64 = [regex]::Replace($raw, '-----[^-]+-----', '') -replace '\s', ''
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[Convert]::FromBase64String($b64))
+        }
         $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
             [System.Security.Cryptography.X509Certificates.StoreName]::Root,
             [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
@@ -3552,25 +3637,24 @@ function Enable-ScambaitBankSsl {
     }
     else {
         Write-Log 'Existing scambait-bank.crt / .key reused' 'INFO'
-        if (-not [IO.File]::Exists($cerPath)) {
-            try {
-                $x = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($crtPath)
-                [IO.File]::WriteAllBytes($cerPath, $x.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+    }
+
+    # Always refresh DER .cer used for trust import (PEM .crt alone is awkward on older .NET)
+    if (-not [IO.File]::Exists($cerPath) -or $needNew) {
+        try {
+            if ([IO.File]::Exists($crtPath)) {
+                $raw = [IO.File]::ReadAllText($crtPath)
+                $b64 = [regex]::Replace($raw, '-----[^-]+-----', '') -replace '\s', ''
+                [IO.File]::WriteAllBytes($cerPath, [Convert]::FromBase64String($b64))
             }
-            catch {
-                Copy-Item -LiteralPath $crtPath -Destination $cerPath -Force
-            }
+        }
+        catch {
+            Write-Log "Could not write DER .cer: $($_.Exception.Message)" 'WARN'
         }
     }
 
-    # Trust for Chrome/Edge (Windows root store)
-    $certutil = Start-Process -FilePath 'certutil.exe' -ArgumentList @('-addstore', '-f', 'Root', $cerPath) -Wait -PassThru -WindowStyle Hidden
-    if ($certutil.ExitCode -eq 0) {
-        Write-Log 'Bank SSL cert installed into Local Machine Trusted Root' 'OK'
-    }
-    else {
-        Write-Log "certutil Root import exit $($certutil.ExitCode)" 'WARN'
-    }
+    # Trust for Chrome/Edge (Windows root store) - .NET API; avoid certutil+spaces path bug
+    [void](Import-ScambaitCertToTrustedRoot -CerPath $cerPath -CrtPath $crtPath)
 
     # Enable SSL module + include httpd-ssl.conf
     $httpdConf = Join-Path $InstallDir 'apache\conf\httpd.conf'
@@ -3643,7 +3727,7 @@ function Start-ScambaitXamppServices {
     # Do NOT run setup_xampp.bat (interactive / hangs under -Wait)
     Update-XamppInternalPaths -InstallDir $InstallDir
     Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
-    Enable-XamppPhpExtensionsForDsjas -InstallDir $InstallDir
+    [void](Enable-XamppPhpExtensionsForDsjas -InstallDir $InstallDir)
 
     $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
     $apacheBat = Join-Path $InstallDir 'apache_start.bat'
@@ -3971,7 +4055,7 @@ function Install-ScambaitXamppDsjas {
         Write-Log 'Legacy XAMPP folder still present (locked). Paths are OK at Package Cache; delete leftover after reboot.' 'WARN'
     }
 
-    Enable-XamppPhpExtensionsForDsjas -InstallDir $x.InstallDir
+    Enable-XamppPhpExtensionsForDsjas -InstallDir $x.InstallDir | Out-Null
 
     # Free IIS/port conflicts, then start Apache + MySQL
     Start-ScambaitXamppServices -InstallDir $x.InstallDir
@@ -4079,7 +4163,7 @@ FLUSH PRIVILEGES;
 
     # SSL is its own step; never let cert failure roll back PHP/DSJAS work
     try {
-        Enable-ScambaitBankSsl -InstallDir $x.InstallDir
+        Enable-ScambaitBankSsl -InstallDir $x.InstallDir | Out-Null
     }
     catch {
         Write-Log "Bank SSL setup deferred: $($_.Exception.Message)" 'WARN'
@@ -4252,8 +4336,8 @@ Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
         throw 'XAMPP not installed - run Install XAMPP + DSJAS first'
     }
     # Always (re)apply PHP modules here so SSL failures never leave DSJAS broken
-    Enable-XamppPhpExtensionsForDsjas -InstallDir $dir
-    Enable-ScambaitBankSsl -InstallDir $dir
+    Enable-XamppPhpExtensionsForDsjas -InstallDir $dir | Out-Null
+    Enable-ScambaitBankSsl -InstallDir $dir | Out-Null
     if (-not (Get-Process httpd -ErrorAction SilentlyContinue)) {
         Start-ScambaitXamppServices -InstallDir $dir
     }
