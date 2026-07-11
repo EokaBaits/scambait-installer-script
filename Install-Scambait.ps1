@@ -2742,73 +2742,64 @@ function Install-ScambaitXamppDsjas {
 
     # --- XAMPP ---
     if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
+        # Skip the Bitnami EXE when we can use portable .7z (EXE silent install is flaky)
+        $usePortable = [bool]$x.PortableUrl
         $installer = Join-Path $tools $x.InstallerName
         $local = Get-ChildItem $tools -Filter 'xampp*.exe' -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -gt 50MB -and $_.Name -notmatch 'portable' } |
             Select-Object -First 1
         if ($local) { $installer = $local.FullName }
 
-        $needDownload = $script:Force -or -not (Test-Path $installer) -or ((Get-Item $installer -ErrorAction SilentlyContinue).Length -lt 50MB)
-        if ($needDownload -and -not $script:SkipDownloads) {
-            $urls = @()
-            if ($x.DownloadUrls) { $urls += @($x.DownloadUrls) }
-            if ($x.DownloadUrl) { $urls += $x.DownloadUrl }
-            if ($x.DownloadUrlAlt) { $urls += $x.DownloadUrlAlt }
-            $urls = $urls | Where-Object { $_ } | Select-Object -Unique
-            $min = if ($x.MinBytes) { [long]$x.MinBytes } else { 100000000 }
-            foreach ($url in $urls) {
-                try {
-                    Download-File -Url $url -OutFile $installer -MinBytes $min
-                    break
-                }
-                catch {
-                    Write-Log "XAMPP URL failed: $($_.Exception.Message)" 'WARN'
-                }
-            }
-        }
-
-        # 1) Bitnami/InstallBuilder silent flags (NOT NSIS /S)
-        if ((Test-Path $installer) -and ((Get-Item $installer).Length -gt 50MB) -and
-            -not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-            Write-Log 'Running XAMPP Bitnami unattended install...' 'INFO'
-            $argSets = @(
-                @(
-                    '--mode', 'unattended',
-                    '--unattendedmodeui', 'none',
-                    '--launchapps', '0',
-                    '--disable-components', 'xampp_mercury,xampp_tomcat,xampp_filezilla,xampp_webalizer',
-                    '--prefix', $x.InstallDir
-                )
-                @(
-                    '--mode', 'unattended',
-                    '--unattendedmodeui', 'none',
-                    '--launchapps', '0'
-                )
-            )
-            foreach ($args in $argSets) {
-                if (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) { break }
-                # Also accept default C:\xampp if that is our target or we can relocate
-                $p = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
-                Write-Log "XAMPP unattended exit $($p.ExitCode) (args: $($args -join ' '))" 'INFO'
-                Start-Sleep 2
-                # Bitnami often ignores --prefix and always uses C:\xampp
-                if ((Test-Path 'C:\xampp\xampp-control.exe') -and $x.InstallDir -ne 'C:\xampp') {
-                    Write-Log "XAMPP landed in C:\xampp (Bitnami default); updating InstallDir expectation" 'WARN'
-                    $x.InstallDir = 'C:\xampp'
-                    $script:Config.Xampp.InstallDir = 'C:\xampp'
+        if (-not $usePortable) {
+            $needDownload = $script:Force -or -not (Test-Path $installer) -or ((Get-Item $installer -ErrorAction SilentlyContinue).Length -lt 50MB)
+            if ($needDownload -and -not $script:SkipDownloads) {
+                $urls = @()
+                if ($x.DownloadUrls) { $urls += @($x.DownloadUrls) }
+                if ($x.DownloadUrl) { $urls += $x.DownloadUrl }
+                if ($x.DownloadUrlAlt) { $urls += $x.DownloadUrlAlt }
+                $urls = $urls | Where-Object { $_ } | Select-Object -Unique
+                $min = if ($x.MinBytes) { [long]$x.MinBytes } else { 100000000 }
+                foreach ($url in $urls) {
+                    try {
+                        Download-File -Url $url -OutFile $installer -MinBytes $min
+                        break
+                    }
+                    catch {
+                        Write-Log "XAMPP URL failed: $($_.Exception.Message)" 'WARN'
+                    }
                 }
             }
         }
 
-        # 2) Portable .7z fallback when EXE install fails (exit 1 / missing files)
+        # Prefer portable .7z - Bitnami EXE silent flags are unreliable under PowerShell Start-Process
+        # (and $args is a reserved automatic variable that broke our previous arg array).
         if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and
             -not (Test-Path 'C:\xampp\xampp-control.exe') -and
-            -not $script:SkipDownloads) {
+            -not $script:SkipDownloads -and
+            $x.PortableUrl) {
             try {
                 Install-XamppFromPortableArchive -XamppConfig $x -ToolsDir $tools
             }
             catch {
-                Write-Log "XAMPP portable fallback failed: $($_.Exception.Message)" 'WARN'
+                Write-Log "XAMPP portable install failed: $($_.Exception.Message)" 'WARN'
+            }
+        }
+
+        # Fallback: Bitnami unattended EXE (single argument string - do NOT use $args)
+        if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -and
+            -not (Test-Path 'C:\xampp\xampp-control.exe') -and
+            (Test-Path $installer) -and ((Get-Item $installer).Length -gt 50MB)) {
+            Write-Log 'Trying XAMPP Bitnami unattended EXE install...' 'INFO'
+            $xamppArgLines = @(
+                "--mode unattended --unattendedmodeui none --launchapps 0 --disable-components xampp_mercury,xampp_tomcat,xampp_filezilla,xampp_webalizer --prefix `"$($x.InstallDir)`""
+                '--mode unattended --unattendedmodeui none --launchapps 0'
+            )
+            foreach ($xamppArgLine in $xamppArgLines) {
+                if ((Test-Path (Join-Path $x.InstallDir 'xampp-control.exe')) -or (Test-Path 'C:\xampp\xampp-control.exe')) { break }
+                Write-Log "XAMPP EXE args: $xamppArgLine" 'INFO'
+                $proc = Start-Process -FilePath $installer -ArgumentList $xamppArgLine -Wait -PassThru -WindowStyle Hidden
+                Write-Log "XAMPP unattended exit $($proc.ExitCode)" 'INFO'
+                Start-Sleep 2
             }
         }
 
@@ -2818,7 +2809,7 @@ function Install-ScambaitXamppDsjas {
         }
 
         if (-not (Test-Path (Join-Path $x.InstallDir 'xampp-control.exe'))) {
-            throw 'XAMPP does not appear installed. Re-run with -Force, or place xampp-installer.exe / extract portable into C:\xampp'
+            throw 'XAMPP does not appear installed. Re-run with -Force (will download portable .7z), or extract XAMPP into C:\xampp manually'
         }
     }
     else {
