@@ -2853,38 +2853,6 @@ function Clear-ScambaitXamppPorts {
     Write-Log 'Port cleanup done - start Apache/MySQL from disguised control panel' 'OK'
 }
 
-function Start-ScambaitXamppServices {
-    param([string]$InstallDir)
-    Clear-ScambaitXamppPorts -InstallDir $InstallDir
-
-    $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
-    $apacheBat = Join-Path $InstallDir 'apache_start.bat'
-    if (Test-Path $apacheBat) {
-        Start-Process $apacheBat -WorkingDirectory $InstallDir -WindowStyle Hidden
-    }
-    if (Test-Path $mysqlBat) {
-        Start-Process $mysqlBat -WorkingDirectory $InstallDir -WindowStyle Hidden
-    }
-    Start-Sleep 4
-
-    $httpd = Join-Path $InstallDir 'apache\bin\httpd.exe'
-    $mysqld = Join-Path $InstallDir 'mysql\bin\mysqld.exe'
-    if ((Test-Path $httpd) -and -not (Get-Process httpd -ErrorAction SilentlyContinue)) {
-        Start-Process $httpd -WorkingDirectory (Split-Path $httpd) -WindowStyle Hidden
-    }
-    if ((Test-Path $mysqld) -and -not (Get-Process mysqld -ErrorAction SilentlyContinue)) {
-        Start-Process $mysqld -WorkingDirectory (Join-Path $InstallDir 'mysql\bin') -WindowStyle Hidden
-    }
-    Start-Sleep 3
-
-    $apacheOk = [bool](Get-Process httpd -ErrorAction SilentlyContinue)
-    $mysqlOk = [bool](Get-Process mysqld -ErrorAction SilentlyContinue)
-    Write-Log "XAMPP services: Apache=$(if ($apacheOk) { 'running' } else { 'NOT running' }) MySQL=$(if ($mysqlOk) { 'running' } else { 'NOT running' })" $(if ($apacheOk -and $mysqlOk) { 'OK' } else { 'WARN' })
-    if (-not $apacheOk -or -not $mysqlOk) {
-        Write-Log 'If still failing: open XAMPP Control Panel as Admin, or run: netstat -ano | findstr ":80 :443 :3306"' 'WARN'
-    }
-}
-
 #region Install-XamppDsjas
 function Get-XamppLegacyRoots {
     @(
@@ -2962,33 +2930,190 @@ function Update-XamppInternalPaths {
             'C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp'
             'C:\ProgramData\PackageCache\A9F3C2E1B847'
             'C:/ProgramData/PackageCache/A9F3C2E1B847'
+            'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}'
+            'C:/ProgramData/Package Cache/{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}'
         )
     )
     $newRoot = $InstallDir.Trim().TrimEnd([char]0x5C)
     $newFwd = $newRoot -replace '\\', '/'
-    $files = Get-ChildItem -Path $InstallDir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -match '\.(conf|ini|bat|txt|cfg|xml|properties|yml|yaml)$' }
+    $files = @()
+    try {
+        $files = [IO.Directory]::GetFiles($newRoot, '*', [IO.SearchOption]::AllDirectories) |
+            Where-Object { $_ -match '\.(conf|ini|bat|cmd|txt|cfg|xml|properties|yml|yaml|inc)$' -and $_ -notmatch '\\mysql\\data\\|\\tmp\\|\\logs\\' }
+    }
+    catch {
+        Write-Log "Path scan failed: $($_.Exception.Message)" 'WARN'
+        return
+    }
+
     $changed = 0
-    foreach ($f in $files) {
-        if ($f.Length -gt 5MB) { continue }
-        if ($f.FullName -match '\\mysql\\data\\|\\tmp\\|\\logs\\') { continue }
+    foreach ($fp in $files) {
         try {
-            $raw = [IO.File]::ReadAllText($f.FullName)
+            $info = Get-Item -LiteralPath $fp -Force -ErrorAction Stop
+            if ($info.Length -gt 8MB) { continue }
+            $raw = [IO.File]::ReadAllText($fp)
             $orig = $raw
             foreach ($old in $OldRoots) {
                 if ([string]::IsNullOrWhiteSpace($old)) { continue }
                 $oldFwd = $old -replace '\\', '/'
-                $raw = $raw.Replace($old, $newRoot)
-                $raw = $raw.Replace($oldFwd, $newFwd)
+                $opt = [Text.RegularExpressions.RegexOptions]::IgnoreCase
+                if ($raw.IndexOf($old, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $raw = [regex]::Replace($raw, [regex]::Escape($old), { $newRoot }, $opt)
+                }
+                if ($raw.IndexOf($oldFwd, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $raw = [regex]::Replace($raw, [regex]::Escape($oldFwd), { $newFwd }, $opt)
+                }
             }
+            # Relative leftovers sometimes written as \xampp\...
+            $raw = $raw -replace '(?i)\\xampp\\', ($newRoot.TrimEnd('\') + '\')
+            $raw = $raw -replace '(?i)/xampp/', ($newFwd.TrimEnd('/') + '/')
             if ($raw -ne $orig) {
-                [IO.File]::WriteAllText($f.FullName, $raw)
+                [IO.File]::WriteAllText($fp, $raw)
                 $changed++
             }
         }
         catch {}
     }
-    Write-Log "Rewrote XAMPP path references in $changed config files -> $newRoot" 'INFO'
+
+    # Force critical keys even if replace missed them
+    $myIni = Join-Path $newRoot 'mysql\bin\my.ini'
+    if (-not [IO.File]::Exists($myIni)) { $myIni = Join-Path $newRoot 'mysql\my.ini' }
+    if ([IO.File]::Exists($myIni)) {
+        try {
+            $ini = [IO.File]::ReadAllText($myIni)
+            $dataFwd = ($newFwd + '/mysql/data') -replace '//', '/'
+            $baseFwd = ($newFwd + '/mysql') -replace '//', '/'
+            $ini2 = $ini
+            $ini2 = [regex]::Replace($ini2, '(?im)^(\s*basedir\s*=\s*).*$', "`${1}`"$baseFwd`"")
+            $ini2 = [regex]::Replace($ini2, '(?im)^(\s*datadir\s*=\s*).*$', "`${1}`"$dataFwd`"")
+            if ($ini2 -notmatch '(?im)^\s*basedir\s*=') {
+                $ini2 = $ini2 -replace '(?im)(\[mysqld\])', "`$1`r`nbasedir=`"$baseFwd`""
+            }
+            if ($ini2 -notmatch '(?im)^\s*datadir\s*=') {
+                $ini2 = $ini2 -replace '(?im)(\[mysqld\])', "`$1`r`ndatadir=`"$dataFwd`""
+            }
+            if ($ini2 -ne $ini) {
+                [IO.File]::WriteAllText($myIni, $ini2)
+                $changed++
+                Write-Log "Forced my.ini basedir/datadir -> $dataFwd" 'OK'
+            }
+        }
+        catch {
+            Write-Log "my.ini patch failed: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    $httpdConf = Join-Path $newRoot 'apache\conf\httpd.conf'
+    if ([IO.File]::Exists($httpdConf)) {
+        try {
+            $hc = [IO.File]::ReadAllText($httpdConf)
+            $srv = ($newFwd + '/apache') -replace '//', '/'
+            $hc2 = [regex]::Replace($hc, '(?im)^(\s*Define\s+SRVROOT\s+).*$', "`${1}`"$srv`"")
+            if ($hc2 -eq $hc) {
+                $hc2 = [regex]::Replace($hc, '(?im)^(\s*ServerRoot\s+).*$', "`${1}`"$srv`"")
+            }
+            if ($hc2 -ne $hc) {
+                [IO.File]::WriteAllText($httpdConf, $hc2)
+                $changed++
+                Write-Log "Forced httpd.conf SRVROOT -> $srv" 'OK'
+            }
+        }
+        catch {
+            Write-Log "httpd.conf patch failed: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    Write-Log "Rewrote XAMPP path references ($changed files) -> $newRoot" 'INFO'
+}
+
+function Repair-XamppMysqlDataPermissions {
+    param([string]$InstallDir)
+    $dataDir = Join-Path $InstallDir 'mysql\data'
+    if (-not [IO.Directory]::Exists($dataDir)) {
+        Write-Log "MySQL data dir missing: $dataDir" 'WARN'
+        return
+    }
+
+    Write-Log "Fixing MySQL data permissions / locks under $dataDir ..." 'INFO'
+    # Clear read-only / system bits that break ibdata1 after moves
+    try { cmd /c "attrib -R -S -H `"$dataDir\*`" /S /D" 2>$null | Out-Null } catch {}
+
+    foreach ($name in @('*.pid', '*.sema', 'aria_log_control.bak')) {
+        Get-ChildItem -LiteralPath $dataDir -Filter $name -Force -ErrorAction SilentlyContinue |
+            ForEach-Object { try { [IO.File]::Delete($_.FullName) } catch {} }
+    }
+
+    # Grant full control to Administrators + SYSTEM + Users (XAMPP often started elevated)
+    $aclTargets = @('SYSTEM', 'Administrators', 'Users', $env:USERNAME)
+    foreach ($id in $aclTargets) {
+        try {
+            & icacls.exe $dataDir /grant "${id}:(OI)(CI)F" /T /C /Q 2>$null | Out-Null
+        }
+        catch {}
+    }
+
+    # Ensure ibdata1 / ib_logfile* are writable
+    foreach ($f in @('ibdata1', 'ib_logfile0', 'ib_logfile1', 'aria_log_control')) {
+        $p = Join-Path $dataDir $f
+        if ([IO.File]::Exists($p)) {
+            try {
+                $fi = Get-Item -LiteralPath $p -Force
+                if ($fi.IsReadOnly) { $fi.IsReadOnly = $false }
+            }
+            catch {}
+        }
+    }
+    Write-Log 'MySQL data directory permissions repaired' 'OK'
+}
+
+function Start-ScambaitXamppServices {
+    param([string]$InstallDir)
+    Clear-ScambaitXamppPorts -InstallDir $InstallDir
+
+    # Configs often still say C:\xampp after a move - rewrite + fix ibdata1 writability
+    Update-XamppInternalPaths -InstallDir $InstallDir
+    Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
+
+    $setup = Join-Path $InstallDir 'setup_xampp.bat'
+    if ([IO.File]::Exists($setup)) {
+        try {
+            Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
+        }
+        catch {}
+        Update-XamppInternalPaths -InstallDir $InstallDir
+    }
+
+    $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
+    $apacheBat = Join-Path $InstallDir 'apache_start.bat'
+    if ([IO.File]::Exists($apacheBat)) {
+        Start-Process $apacheBat -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
+    if ([IO.File]::Exists($mysqlBat)) {
+        Start-Process $mysqlBat -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
+    Start-Sleep 4
+
+    $httpd = Join-Path $InstallDir 'apache\bin\httpd.exe'
+    $mysqld = Join-Path $InstallDir 'mysql\bin\mysqld.exe'
+    $myIni = Join-Path $InstallDir 'mysql\bin\my.ini'
+    if (-not [IO.File]::Exists($myIni)) { $myIni = Join-Path $InstallDir 'mysql\my.ini' }
+
+    if ([IO.File]::Exists($httpd) -and -not (Get-Process httpd -ErrorAction SilentlyContinue)) {
+        Start-Process $httpd -ArgumentList '-d', "`"$(Join-Path $InstallDir 'apache')`"" -WorkingDirectory (Join-Path $InstallDir 'apache\bin') -WindowStyle Hidden
+    }
+    if ([IO.File]::Exists($mysqld) -and -not (Get-Process mysqld -ErrorAction SilentlyContinue)) {
+        $mysqldArgs = @()
+        if ([IO.File]::Exists($myIni)) { $mysqldArgs += @('--defaults-file=' + $myIni) }
+        Start-Process $mysqld -ArgumentList $mysqldArgs -WorkingDirectory (Join-Path $InstallDir 'mysql\bin') -WindowStyle Hidden
+    }
+    Start-Sleep 3
+
+    $apacheOk = [bool](Get-Process httpd -ErrorAction SilentlyContinue)
+    $mysqlOk = [bool](Get-Process mysqld -ErrorAction SilentlyContinue)
+    Write-Log "XAMPP services: Apache=$(if ($apacheOk) { 'running' } else { 'NOT running' }) MySQL=$(if ($mysqlOk) { 'running' } else { 'NOT running' })" $(if ($apacheOk -and $mysqlOk) { 'OK' } else { 'WARN' })
+    if (-not $apacheOk -or -not $mysqlOk) {
+        Write-Log 'If still failing: run control panel as Admin from BANK_STACK.txt; check mysql\data\*.err' 'WARN'
+    }
 }
 
 function Move-XamppTree {
@@ -3066,6 +3191,7 @@ function Mask-ScambaitXamppInstall {
     }
 
     Update-XamppInternalPaths -InstallDir $InstallDir
+    Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
 
     $setup = Join-Path $InstallDir 'setup_xampp.bat'
     if ([IO.File]::Exists($setup)) {
