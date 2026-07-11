@@ -102,18 +102,19 @@ $script:Config = @{
 
     # Programs a 62-year-old Chicago retiree (or his kids) would plausibly install
     # Optional DownloadUrl = direct installer when winget hash/package is unreliable
+    # DownloadFileName = friendly name left in the user's Downloads folder (legit look)
     WingetPackages = @(
-        @{ Id = 'Google.Chrome'; Name = 'Google Chrome' }
-        @{ Id = 'Adobe.Acrobat.Reader.64-bit'; Name = 'Adobe Acrobat Reader' }
-        @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player' }
-        @{ Id = 'RARLab.WinRAR'; Name = 'WinRAR' }
-        @{ Id = 'Zoom.Zoom'; Name = 'Zoom' }
-        @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner'; DownloadUrl = 'https://download.ccleaner.com/ccsetup.exe'; InstallerName = 'ccsetup.exe'; SilentArgs = '/S' }
-        @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes' }
-        @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice' }
-        @{ Id = 'Dropbox.Dropbox'; Name = 'Dropbox' }
-        @{ Id = 'Google.GoogleDrive'; Name = 'Google Drive' }
-        @{ Id = 'Amazon.Kindle'; Name = 'Kindle' }
+        @{ Id = 'Google.Chrome'; Name = 'Google Chrome'; DownloadFileName = 'ChromeSetup.exe' }
+        @{ Id = 'Adobe.Acrobat.Reader.64-bit'; Name = 'Adobe Acrobat Reader'; DownloadFileName = 'AcrobatReaderDC_Setup.exe' }
+        @{ Id = 'VideoLAN.VLC'; Name = 'VLC Media Player'; DownloadFileName = 'vlc-win64.exe' }
+        @{ Id = 'RARLab.WinRAR'; Name = 'WinRAR'; DownloadFileName = 'winrar-x64.exe' }
+        @{ Id = 'Zoom.Zoom'; Name = 'Zoom'; DownloadFileName = 'ZoomInstallerFull.exe' }
+        @{ Id = 'Piriform.CCleaner'; Name = 'CCleaner'; DownloadUrl = 'https://download.ccleaner.com/ccsetup.exe'; InstallerName = 'ccsetup.exe'; SilentArgs = '/S'; DownloadFileName = 'ccsetup.exe' }
+        @{ Id = 'Malwarebytes.Malwarebytes'; Name = 'Malwarebytes'; DownloadFileName = 'MBSetup.exe' }
+        @{ Id = 'TheDocumentFoundation.LibreOffice'; Name = 'LibreOffice'; DownloadFileName = 'LibreOffice_Win_x86_64.msi' }
+        @{ Id = 'Dropbox.Dropbox'; Name = 'Dropbox'; DownloadFileName = 'DropboxInstaller.exe' }
+        @{ Id = 'Google.GoogleDrive'; Name = 'Google Drive'; DownloadFileName = 'GoogleDriveSetup.exe' }
+        @{ Id = 'Amazon.Kindle'; Name = 'Kindle'; DownloadFileName = 'KindleForPC-installer.exe' }
     )
 
     SkipWingetIds = @()
@@ -199,6 +200,7 @@ $script:Config = @{
         SetTimezone              = $true
         SetChromeDefaults        = $true
         ConfigureBankSsl         = $true
+        ClearToolArtifacts       = $true
     }
 }
 
@@ -2180,8 +2182,8 @@ Paper jam tray 2 again
 Denise said turn off, pull tray, clear paper, turn on
 Still says offline half the time
 "@ }
-        @{ file = 'Setup_AnyDesk.exe'; url = 'https://download.anydesk.com/AnyDesk.exe'; mime = 'application/x-msdownload'; size = 4200000; days_ago = 3; kind = 'stub'; title = 'AnyDesk' }
-        @{ file = 'ChromeSetup.exe'; url = 'https://dl.google.com/chrome/install/ChromeStandaloneSetup64.exe'; mime = 'application/x-msdownload'; size = 78000000; days_ago = 100; kind = 'stub'; title = 'Chrome Setup' }
+        # Real installers for winget apps are added by Seed-WingetInstallerDownloads (not stubs)
+        @{ file = 'AnyDesk.exe'; url = 'https://download.anydesk.com/AnyDesk.exe'; mime = 'application/x-msdownload'; size = 4200000; days_ago = 3; kind = 'real'; title = 'AnyDesk'; download_url = 'https://download.anydesk.com/AnyDesk.exe' }
     ) | ForEach-Object {
         $_['path'] = Join-Path $downloads $_.file
         $_
@@ -2252,6 +2254,20 @@ startxref
                 # Tiny stub so the filename exists; not a real installer
                 [IO.File]::WriteAllBytes($path, [byte[]](0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00))
             }
+            'real' {
+                if ($script:SkipDownloads) {
+                    Write-Log "SkipDownloads: not fetching $($item.file)" 'WARN'
+                }
+                elseif ($script:Force -or -not (Test-Path $path) -or ((Get-Item $path).Length -lt 50000)) {
+                    $url = if ($item.download_url) { $item.download_url } else { $item.url }
+                    try {
+                        Download-File -Url $url -OutFile $path -MinBytes 50000
+                    }
+                    catch {
+                        Write-Log "Real download failed for $($item.file): $($_.Exception.Message)" 'WARN'
+                    }
+                }
+            }
             default {
                 Set-Content -Path $path -Value $item.title -Encoding UTF8
             }
@@ -2260,10 +2276,12 @@ startxref
         # Backdate timestamps
         try {
             $when = (Get-Date).AddDays(-1 * [int]$item.days_ago).AddHours(-1 * (Get-Random -Minimum 1 -Maximum 10))
-            $fi = Get-Item $path
-            $fi.CreationTime = $when
-            $fi.LastWriteTime = $when
-            $fi.LastAccessTime = $when.AddDays((Get-Random -Minimum 0 -Maximum 5))
+            $fi = Get-Item $path -ErrorAction SilentlyContinue
+            if ($fi) {
+                $fi.CreationTime = $when
+                $fi.LastWriteTime = $when
+                $fi.LastAccessTime = $when.AddDays((Get-Random -Minimum 0 -Maximum 5))
+            }
         }
         catch {}
     }
@@ -2279,7 +2297,184 @@ startxref
         Set-Content -Path $kv.Key -Value $kv.Value -Encoding UTF8
     }
 
-    Write-Log "Downloads seeded ($($manifest.Count) files) in $downloads" 'OK'
+    Seed-WingetInstallerDownloads -DownloadsDir $downloads
+
+    Write-Log "Downloads seeded ($($manifest.Count) persona files + winget installers) in $downloads" 'OK'
+}
+
+function Get-UserDownloadsDir {
+    $downloads = $null
+    try {
+        $downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+    }
+    catch {}
+    if (-not $downloads) { $downloads = Join-Path $env:USERPROFILE 'Downloads' }
+    return $downloads
+}
+
+function Set-FileBackdated {
+    param([string]$Path, [int]$DaysAgo = 30)
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $when = (Get-Date).AddDays(-1 * [Math]::Max(1, $DaysAgo)).AddHours(-1 * (Get-Random -Minimum 1 -Maximum 12))
+        $fi = Get-Item -LiteralPath $Path -Force
+        $fi.CreationTime = $when
+        $fi.LastWriteTime = $when
+        $fi.LastAccessTime = $when.AddDays((Get-Random -Minimum 0 -Maximum 4))
+    }
+    catch {}
+}
+
+function Seed-WingetInstallerDownloads {
+    param([string]$DownloadsDir)
+    if (-not $DownloadsDir) { $DownloadsDir = Get-UserDownloadsDir }
+    Ensure-Dir $DownloadsDir
+    Write-Log 'Populating Downloads with real winget package installers (legit look)...' 'INFO'
+
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Log 'winget missing - skipping installer population in Downloads' 'WARN'
+        return
+    }
+
+    $day = 20
+    foreach ($pkg in @($script:Config.WingetPackages)) {
+        if ($script:Config.SkipWingetIds -contains $pkg.Id) { continue }
+        $friendly = if ($pkg.DownloadFileName) { $pkg.DownloadFileName } else { ($pkg.Name -replace '\s', '') + 'Setup.exe' }
+        $dest = Join-Path $DownloadsDir $friendly
+
+        if (-not $script:Force -and (Test-Path $dest) -and ((Get-Item $dest).Length -gt 100000)) {
+            Write-Log "Downloads already has $friendly" 'OK'
+            Set-FileBackdated -Path $dest -DaysAgo $day
+            $day += (Get-Random -Minimum 3 -Maximum 12)
+            continue
+        }
+
+        # Prefer package DownloadUrl when we already know a CDN link
+        if ($pkg.DownloadUrl -and -not $script:SkipDownloads) {
+            try {
+                Download-File -Url $pkg.DownloadUrl -OutFile $dest -MinBytes 50000
+                Set-FileBackdated -Path $dest -DaysAgo $day
+                Write-Log "Downloads: $friendly (direct)" 'OK'
+                $day += (Get-Random -Minimum 3 -Maximum 12)
+                continue
+            }
+            catch {
+                Write-Log "Direct Downloads seed failed for $($pkg.Name): $($_.Exception.Message)" 'WARN'
+            }
+        }
+
+        if ($script:SkipDownloads) { continue }
+
+        $stage = Join-Path $script:WorkDir ("winget-dl-" + ($pkg.Id -replace '[^A-Za-z0-9]', '_'))
+        try {
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+            Ensure-Dir $stage
+            Write-Log "winget download $($pkg.Id) -> staging..." 'INFO'
+            $out = winget download --id $pkg.Id -e --download-directory $stage --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+            $installer = Get-ChildItem -LiteralPath $stage -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -match '\.(exe|msi|msix|appx|msixbundle)$' -and $_.Length -gt 100000 } |
+                Sort-Object Length -Descending |
+                Select-Object -First 1
+            if ($installer) {
+                Copy-Item -LiteralPath $installer.FullName -Destination $dest -Force
+                Set-FileBackdated -Path $dest -DaysAgo $day
+                Write-Log "Downloads: $friendly ($([Math]::Round($installer.Length/1MB,1)) MB)" 'OK'
+            }
+            else {
+                Write-Log "winget download produced no installer for $($pkg.Name). Output: $($out.Substring(0, [Math]::Min(200, $out.Length)))" 'WARN'
+            }
+        }
+        catch {
+            Write-Log "winget download failed for $($pkg.Name): $($_.Exception.Message)" 'WARN'
+        }
+        finally {
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        $day += (Get-Random -Minimum 3 -Maximum 12)
+    }
+}
+
+function Clear-ScambaitToolArtifacts {
+    Write-Log 'Cleaning scambait / XAMPP / DSJAS download artifacts...' 'INFO'
+    $script:removedArtifacts = 0
+
+    $namePatterns = @(
+        'xampp*'
+        '*xampp*'
+        'DSJAS*'
+        '*DSJAS*'
+        'Midwest-Bank*'
+        'midwest_bank*'
+        'FuckScreen*'
+        'NoBlock*'
+        'UnityCapture*'
+        'sqlite-tools*'
+        'sqlite-tools.zip'
+        'scambait*'
+        '*scambait*'
+        'winget-dl-*'
+        'dsjas_extract*'
+        'xampp-extract*'
+        'DefaultAssociations.xml'
+        'scambait-bank*'
+        'scambait-bank-openssl.cnf'
+    )
+
+    $scanRoots = @(
+        $script:WorkDir
+        (Join-Path $script:WorkDir 'tools')
+        $env:TEMP
+        (Join-Path $env:LOCALAPPDATA 'Temp')
+        (Get-UserDownloadsDir)
+        ([Environment]::GetFolderPath('Desktop'))
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+    $downloadsRoot = Get-UserDownloadsDir
+
+    foreach ($root in $scanRoots) {
+        foreach ($pat in $namePatterns) {
+            Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like $pat } |
+                ForEach-Object {
+                    if ($_.FullName -like '*Package Cache*') { return }
+                    if ($_.Name -eq 'install.log') { return }
+                    if ($script:BaiterNotesFile -and $_.Name -eq $script:BaiterNotesFile) { return }
+                    if ($_.Name -eq 'READ_ME_PROXMOX_HOST.txt') { return }
+                    # Keep legitimate-looking Downloads installers (ChromeSetup, VLC, etc.)
+                    if ($downloadsRoot -and ($root -eq $downloadsRoot) -and $_.Extension -match '\.(exe|msi)$' -and $_.Name -notmatch '(?i)xampp|dsjas|midwest-bank|midwest_bank|fuckscreen|noblock|scambait|unitycapture') {
+                        return
+                    }
+                    try {
+                        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+                        $script:removedArtifacts++
+                        Write-Log "Removed artifact: $($_.FullName)" 'OK'
+                    }
+                    catch {
+                        Write-Log "Could not remove $($_.FullName): $($_.Exception.Message)" 'WARN'
+                    }
+                }
+        }
+    }
+
+    $removed = if ($script:removedArtifacts) { [int]$script:removedArtifacts } else { 0 }
+    $script:removedArtifacts = 0
+
+    # Wipe known extract subdirs under WorkDir even if pattern miss
+    foreach ($sub in @('tools', 'xampp-extract', 'dsjas_extract', 'midwest_bank_theme_extract', 'UnityCapture', 'sqlite-tools')) {
+        $p = Join-Path $script:WorkDir $sub
+        if (Test-Path $p) {
+            try {
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+                $removed++
+                Write-Log "Removed workdir folder: $p" 'OK'
+            }
+            catch {}
+        }
+    }
+
+    # Recreate empty tools dir for any late steps
+    Ensure-Dir (Join-Path $script:WorkDir 'tools')
+    Write-Log "Artifact cleanup done ($removed items removed)" 'OK'
 }
 
 function Export-ChromeBookmarkFallback {
@@ -3932,6 +4127,12 @@ Bank URL: https://www.$($script:Config.Persona.BankDomain)
 Also:       http://$($script:Config.Persona.BankDomain)
 SSL:        Local Machine Root (scambait-bank.crt under apache\conf\ssl.crt)
 
+MySQL host for DSJAS wizard: localhost   (NEVER the bank domain)
+DB name/user/pass: see web setup section below / persona config
+
+Explorer: folder is Hidden under Package Cache - enable "Show hidden items"
+or paste Install dir into the address bar.
+
 Do not use:
   C:\xampp
   C:\ProgramData\PackageCache\A9F3C2E1B847
@@ -3940,9 +4141,11 @@ Do not use:
     }
 
     try {
+        # Hidden only on the install root (NOT +S /S) so baiters can find it with
+        # "Show hidden files". System+recursive made Package Cache look empty in Explorer.
         $item = Get-Item -LiteralPath $InstallDir -Force
-        $item.Attributes = $item.Attributes -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
-        cmd /c "attrib +S +H `"$InstallDir`" /S /D" 2>$null | Out-Null
+        $item.Attributes = ($item.Attributes -bor [IO.FileAttributes]::Hidden) -band (-bnot [IO.FileAttributes]::System)
+        cmd /c "attrib -S +H `"$InstallDir`"" 2>$null | Out-Null
     }
     catch {}
 
@@ -3998,6 +4201,96 @@ function Install-XamppFromPortableArchive {
         'C:/ProgramData/PackageCache/A9F3C2E1B847'
     )
     Write-Log "XAMPP portable staged at $($XamppConfig.InstallDir)" 'OK'
+}
+
+function Get-DsjasConfigIniPath {
+    param([string]$Htdocs)
+    $candidates = @(
+        (Join-Path $Htdocs 'Config.ini')
+        (Join-Path $Htdocs 'config.ini')
+        (Join-Path $Htdocs 'Config\Config.ini')
+        (Join-Path $Htdocs 'config\Config.ini')
+    )
+    foreach ($c in $candidates) {
+        if ([IO.File]::Exists($c)) { return $c }
+    }
+    return $null
+}
+
+function Repair-DsjasSiteConfig {
+    param([string]$Htdocs)
+    $persona = $script:Config.Persona
+    $cfgPath = Get-DsjasConfigIniPath -Htdocs $Htdocs
+    if (-not $cfgPath) {
+        Write-Log 'DSJAS Config.ini not found yet (finish web installer, then re-run to patch DB host)' 'WARN'
+        return $false
+    }
+
+    Write-Log "Repairing DSJAS Config.ini DB host / bank domain: $cfgPath" 'INFO'
+    $raw = [IO.File]::ReadAllText($cfgPath)
+    $orig = $raw
+    $bak = "$cfgPath.bak-scambait"
+    if (-not [IO.File]::Exists($bak)) {
+        Copy-Item -LiteralPath $cfgPath -Destination $bak -Force
+    }
+
+    # MySQL must be localhost - never the public bank hostname
+    if ($raw -match '(?im)^\s*server_hostname\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*server_hostname\s*=\s*.*$', 'server_hostname="localhost"')
+    }
+    else {
+        if ($raw -match '(?im)\[database\]') {
+            $raw = [regex]::Replace($raw, '(?im)(\[database\])', "`$1`r`nserver_hostname=`"localhost`"")
+        }
+        else {
+            $raw += "`r`n[database]`r`nserver_hostname=`"localhost`"`r`n"
+        }
+    }
+
+    # Ensure credentials / DB name match persona (wizard typos are common)
+    $dbName = $persona.BankDbName
+    $dbUser = $persona.BankDbUser
+    $dbPass = $persona.BankDbPassword
+    if ($raw -match '(?im)^\s*database_name\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*database_name\s*=\s*.*$', "database_name=`"$dbName`"")
+    }
+    if ($raw -match '(?im)^\s*username\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*username\s*=\s*.*$', "username=`"$dbUser`"")
+    }
+    if ($raw -match '(?im)^\s*password\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*password\s*=\s*.*$', "password=`"$dbPass`"")
+    }
+
+    # Public bank identity (mbwi.com) - not MySQL host
+    $domain = $persona.BankDomain
+    $bankName = $persona.BankName
+    if ($raw -match '(?im)^\s*bank_domain\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*bank_domain\s*=\s*.*$', "bank_domain=`"$domain`"")
+    }
+    if ($raw -match '(?im)^\s*bank_name\s*=') {
+        $raw = [regex]::Replace($raw, '(?im)^\s*bank_name\s*=\s*.*$', "bank_name=`"$bankName`"")
+    }
+
+    # Strip accidental old domain as DB host leftovers in free text
+    $raw = $raw -replace 'midwestcommunitybank\.com', $domain
+
+    if ($raw -ne $orig) {
+        [IO.File]::WriteAllText($cfgPath, $raw)
+        Write-Log 'DSJAS Config.ini patched: server_hostname=localhost, bank_domain/credentials aligned' 'OK'
+    }
+    else {
+        Write-Log 'DSJAS Config.ini already looks correct' 'INFO'
+    }
+
+    # Sanity: bank domain must never be the MySQL hostname
+    $check = [IO.File]::ReadAllText($cfgPath)
+    $hostLine = [regex]::Match($check, '(?im)^\s*server_hostname\s*=\s*.*$').Value
+    if ($hostLine -and ($hostLine -match [regex]::Escape($domain) -or $hostLine -match 'midwestcommunitybank' -or $hostLine -match 'mbwi\.com')) {
+        $check = [regex]::Replace($check, '(?im)^\s*server_hostname\s*=\s*.*$', 'server_hostname="localhost"')
+        [IO.File]::WriteAllText($cfgPath, $check)
+        Write-Log 'Forced server_hostname=localhost (was bank domain)' 'OK'
+    }
+    return $true
 }
 
 function Test-DsjasMidwestBankThemeInstalled {
@@ -4356,6 +4649,7 @@ FLUSH PRIVILEGES;
     }
 
     Install-DsjasMidwestBankTheme -Htdocs $htdocs -ToolsDir $tools
+    Repair-DsjasSiteConfig -Htdocs $htdocs | Out-Null
 
     # Hosts file for bank domain (guide Part III - gateway IP)
     # If XAMPP runs IN the VM, use 127.0.0.1. If on host, use default gateway.
@@ -4399,6 +4693,7 @@ FLUSH PRIVILEGES;
 --- web setup ---
 Bank URL: https://www.$($persona.BankDomain)
 Setup:    http://localhost/
+DB host:  localhost   <--- MUST be localhost (not mbwi.com / bank domain)
 DB name:  $($persona.BankDbName)
 DB user:  $($persona.BankDbUser)
 DB pass:  $($persona.BankDbPassword)
@@ -4420,6 +4715,8 @@ If Chrome still warns once: fully quit Chrome (tray too) and reopen.
 
     # Try to open setup
     Start-Process 'http://localhost/'
+
+    Clear-ScambaitToolArtifacts
 
     Write-Log 'XAMPP + DSJAS deploy done - finish browser setup wizard if shown' 'OK'
 }
@@ -4522,9 +4819,10 @@ Invoke-Step 'Copy wallpapers' 'CopyWallpapers' { Copy-ScambaitWallpapers } -Once
     (Test-Path $d) -and [bool](Get-ChildItem $d -File -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 Invoke-Step 'Seed Downloads folder' 'SeedDownloads' { Seed-ScambaitDownloads } -OnceKey 'SeedDownloads' -IsInstalled {
-    $dl = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
-    if (-not $dl) { $dl = Join-Path $env:USERPROFILE 'Downloads' }
-    Test-Path (Join-Path $dl 'how_to_use_gmail_notes.txt')
+    $dl = Get-UserDownloadsDir
+    $personaOk = Test-Path (Join-Path $dl 'how_to_use_gmail_notes.txt')
+    $chromeOk = Test-Path (Join-Path $dl 'ChromeSetup.exe')
+    $personaOk -and $chromeOk
 }
 Invoke-Step 'Seed Chrome history' 'SeedChromeHistory' { Seed-ScambaitChromeHistory } -OnceKey 'SeedChromeHistory' -IsInstalled {
     Test-ScambaitChromeHistoryPopulated
@@ -4572,6 +4870,7 @@ Invoke-Step 'Trust bank SSL for Chrome' 'ConfigureBankSsl' {
     }
     # Always (re)apply PHP modules here so SSL failures never leave DSJAS broken
     Enable-XamppPhpExtensionsForDsjas -InstallDir $dir | Out-Null
+    Repair-DsjasSiteConfig -Htdocs (Join-Path $dir 'htdocs') | Out-Null
     Enable-ScambaitBankSsl -InstallDir $dir | Out-Null
     if (-not (Get-Process httpd -ErrorAction SilentlyContinue)) {
         Start-ScambaitXamppServices -InstallDir $dir
@@ -4586,19 +4885,19 @@ Invoke-Step 'Write Proxmox host instructions to Desktop' $null {
     @"
 Apply this ON THE PROXMOX HOST (not inside Windows), then full shutdown + start the VM.
 
-Replace 100 with your VMID:
+Replace 104 with your VMID (see host\proxmox-smbios.conf for OptiPlex 7020 story):
 
-qm set 100 -smbios1 "uuid=`$(cat /proc/sys/kernel/random/uuid),manufacturer=`$(echo -n 'Dell Inc.' | base64 -w0),product=`$(echo -n 'OptiPlex 7070' | base64 -w0),version=`$(echo -n '1.0.0' | base64 -w0),serial=`$(echo -n '5QK2R93' | base64 -w0),sku=`$(echo -n '07A1' | base64 -w0),family=`$(echo -n 'OptiPlex' | base64 -w0),base64=1"
-qm set 100 -args "-cpu host,-hypervisor,kvm=off"
-qm set 100 -agent 0
-qm shutdown 100 && qm start 100
-
-Or paste into /etc/pve/qemu-server/VMID.conf:
-smbios1: uuid=11111111-2222-3333-4444-555555555555,manufacturer=RGVsbCBJbmMu,product=T3B0aVBsZXggNzA3MA==,version=MS4wLjA=,serial=NVFLMlI5Mw==,sku=MDdBMQ==,family=T3B0aVBsZXg=,base64=1
-args: -cpu host,-hypervisor,kvm=off
-agent: 0
+qm set 104 -smbios1 "uuid=`$(cat /proc/sys/kernel/random/uuid),manufacturer=`$(echo -n 'Dell Inc.' | base64 -w0),product=`$(echo -n 'OptiPlex 7020' | base64 -w0),version=`$(echo -n '1.2.0' | base64 -w0),serial=`$(echo -n '7XK9M2A' | base64 -w0),sku=`$(echo -n '0B0B' | base64 -w0),family=`$(echo -n 'OptiPlex' | base64 -w0),base64=1"
+qm set 104 -cpu host
+qm set 104 -args "-cpu host,-hypervisor,kvm=off,host-cache-info=off,l3-cache=on,tsc-frequency=2100000000,model_id='Intel(R) Core(TM) i7-14700'"
+qm set 104 -agent 0
+qm shutdown 104 && qm start 104
 "@ | Set-Content $txt -Encoding UTF8
     Write-Log "Wrote $txt" 'OK'
+}
+
+Invoke-Step 'Clean scambait download artifacts' 'ClearToolArtifacts' {
+    Clear-ScambaitToolArtifacts
 }
 
 Write-Log 'Installer finished.' 'OK'
