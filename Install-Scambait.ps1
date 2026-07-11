@@ -3043,19 +3043,14 @@ function Repair-XamppMysqlDataPermissions {
             ForEach-Object { try { [IO.File]::Delete($_.FullName) } catch {} }
     }
 
-    # Grant full control to Administrators + SYSTEM + Users (XAMPP often started elevated)
-    $aclTargets = @('SYSTEM', 'Administrators', 'Users', $env:USERNAME)
-    foreach ($id in $aclTargets) {
-        try {
-            & icacls.exe $dataDir /grant "${id}:(OI)(CI)F" /T /C /Q 2>$null | Out-Null
-        }
-        catch {}
+    # Grant on the folder only (avoid icacls /T which can hang on locked InnoDB files)
+    foreach ($id in @('SYSTEM', 'Administrators', 'Users')) {
+        try { & icacls.exe $dataDir /grant "${id}:(OI)(CI)F" /C /Q 2>$null | Out-Null } catch {}
     }
-
-    # Ensure ibdata1 / ib_logfile* are writable
     foreach ($f in @('ibdata1', 'ib_logfile0', 'ib_logfile1', 'aria_log_control')) {
         $p = Join-Path $dataDir $f
         if ([IO.File]::Exists($p)) {
+            try { & icacls.exe $p /grant "Administrators:F" "SYSTEM:F" "Users:F" /C /Q 2>$null | Out-Null } catch {}
             try {
                 $fi = Get-Item -LiteralPath $p -Force
                 if ($fi.IsReadOnly) { $fi.IsReadOnly = $false }
@@ -3071,17 +3066,9 @@ function Start-ScambaitXamppServices {
     Clear-ScambaitXamppPorts -InstallDir $InstallDir
 
     # Configs often still say C:\xampp after a move - rewrite + fix ibdata1 writability
+    # Do NOT run setup_xampp.bat (interactive / hangs under -Wait)
     Update-XamppInternalPaths -InstallDir $InstallDir
     Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
-
-    $setup = Join-Path $InstallDir 'setup_xampp.bat'
-    if ([IO.File]::Exists($setup)) {
-        try {
-            Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
-        }
-        catch {}
-        Update-XamppInternalPaths -InstallDir $InstallDir
-    }
 
     $mysqlBat = Join-Path $InstallDir 'mysql_start.bat'
     $apacheBat = Join-Path $InstallDir 'apache_start.bat'
@@ -3192,17 +3179,7 @@ function Mask-ScambaitXamppInstall {
 
     Update-XamppInternalPaths -InstallDir $InstallDir
     Repair-XamppMysqlDataPermissions -InstallDir $InstallDir
-
-    $setup = Join-Path $InstallDir 'setup_xampp.bat'
-    if ([IO.File]::Exists($setup)) {
-        try {
-            Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
-            Write-Log 'Ran setup_xampp.bat for path relocation' 'OK'
-        }
-        catch {
-            Write-Log "setup_xampp.bat skipped: $($_.Exception.Message)" 'WARN'
-        }
-    }
+    # Skip setup_xampp.bat - it blocks forever under automation; paths are patched above
 
     $legacyCtrl = Join-Path $InstallDir 'xampp-control.exe'
     $maskedCtrl = Join-Path $InstallDir $wantedExe
