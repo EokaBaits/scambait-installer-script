@@ -151,8 +151,8 @@ $script:Config = @{
     }
 
     Xampp = @{
-        # Obscure path (no "xampp" in name). Avoid spaces - XAMPP configs break easily with them.
-        InstallDir       = 'C:\ProgramData\PackageCache\A9F3C2E1B847'
+        # Real Windows path is "Package Cache" (with space). GUID-style folder blends with MSI/VC++ caches.
+        InstallDir       = 'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}'
         ControlExeName   = 'WdiServiceHost.exe'   # renamed from xampp-control.exe
         PanelLnkName     = 'Diagnostic Policy Host.lnk'  # only under ProgramData\Scambait (baiter)
         # SourceForge often 403s bare links; prefer viasf=1 mirrors + portable 7z fallback
@@ -2784,7 +2784,7 @@ End Sub
 
 
 function Clear-ScambaitXamppPorts {
-    param([string]$InstallDir = 'C:\ProgramData\PackageCache\A9F3C2E1B847')
+    param([string]$InstallDir = 'C:\ProgramData\Package Cache\{A9F3C2E1-B847-4D2A-9C1E-8F0B2A3D4E5F}')
     Write-Log 'Freeing ports 80/443/3306 for XAMPP (stop IIS / leftover httpd/mysqld)...' 'INFO'
 
     # IIS / HTTP.sys often owns :80/:443 as PID 8 ("Unable to open process")
@@ -2886,39 +2886,93 @@ function Start-ScambaitXamppServices {
 }
 
 #region Install-XamppDsjas
+function Get-XamppLegacyRoots {
+    @(
+        'C:\xampp'
+        'C:\ProgramData\PackageCache\A9F3C2E1B847'
+    )
+}
+
+function Test-XamppDirHasTree {
+    param([string]$Dir)
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return $false }
+    $wanted = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'WdiServiceHost.exe' }
+    return (Test-Path (Join-Path $Dir 'apache\bin\httpd.exe')) -or
+        (Test-Path (Join-Path $Dir $wanted)) -or
+        (Test-Path (Join-Path $Dir 'xampp-control.exe'))
+}
+
 function Get-XamppControlPath {
     param([string]$InstallDir = $script:Config.Xampp.InstallDir)
     $wanted = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'xampp-control.exe' }
-    foreach ($dir in @($InstallDir, 'C:\xampp', 'C:\ProgramData\PackageCache\A9F3C2E1B847')) {
-        if (-not $dir) { continue }
-        foreach ($name in @($wanted, 'xampp-control.exe', 'xampp-control-3-beta.exe')) {
-            $p = Join-Path $dir $name
-            if (Test-Path $p) { return $p }
-        }
+    # Prefer configured dir only; do not treat legacy PackageCache as "installed correctly"
+    foreach ($name in @($wanted, 'xampp-control.exe', 'xampp-control-3-beta.exe')) {
+        $p = Join-Path $InstallDir $name
+        if (Test-Path $p) { return $p }
     }
     return (Join-Path $InstallDir $wanted)
 }
 
 function Test-XamppTreePresent {
     param([string]$InstallDir = $script:Config.Xampp.InstallDir)
-    $ctrl = Get-XamppControlPath -InstallDir $InstallDir
-    return (Test-Path $ctrl) -or (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))
+    return (Test-XamppDirHasTree -Dir $InstallDir)
+}
+
+function Test-XamppLegacyPresent {
+    foreach ($legacy in Get-XamppLegacyRoots) {
+        if (Test-XamppDirHasTree -Dir $legacy) { return $true }
+    }
+    return $false
+}
+
+function Remove-XamppTreeForce {
+    param([string]$Dir, [string]$Reason = 'cleanup')
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return }
+    Write-Log "Removing XAMPP tree ($Reason): $Dir" 'INFO'
+    Clear-ScambaitXamppPorts -InstallDir $Dir
+    Start-Sleep 1
+    try {
+        # Clear system/hidden so Remove-Item can delete
+        cmd /c "attrib -S -H -R `"$Dir`" /S /D" 2>$null | Out-Null
+    }
+    catch {}
+    try {
+        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction Stop
+        Write-Log "Removed $Dir" 'OK'
+    }
+    catch {
+        Write-Log "Remove-Item failed for ${Dir}: $($_.Exception.Message) - trying robocopy mirror empty..." 'WARN'
+        $empty = Join-Path $env:TEMP ("xampp_empty_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        & robocopy.exe $empty $Dir /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+        Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $Dir) {
+            Write-Log "WARNING: could not fully delete $Dir - delete manually after reboot" 'WARN'
+        }
+        else {
+            Write-Log "Removed $Dir (via robocopy)" 'OK'
+        }
+    }
 }
 
 function Update-XamppInternalPaths {
     param(
         [string]$InstallDir,
-        [string[]]$OldRoots = @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
+        [string[]]$OldRoots = @(
+            'C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp'
+            'C:\ProgramData\PackageCache\A9F3C2E1B847'
+            'C:/ProgramData/PackageCache/A9F3C2E1B847'
+        )
     )
     $newRoot = $InstallDir.TrimEnd('\')
     $newFwd = $newRoot -replace '\\', '/'
     $patterns = @(
         '*.conf', '*.ini', '*.bat', '*.txt', '*.cfg', '*.xml', '*.properties', '*.yml', '*.yaml'
     )
-    $files = Get-ChildItem -Path $InstallDir -Recurse -File -Include $patterns -ErrorAction SilentlyContinue
+    $files = Get-ChildItem -LiteralPath $InstallDir -Recurse -File -Include $patterns -ErrorAction SilentlyContinue
     $changed = 0
     foreach ($f in $files) {
-        # Skip huge binary-ish / log files
         if ($f.Length -gt 5MB) { continue }
         if ($f.FullName -match '\\mysql\\data\\|\\tmp\\|\\logs\\') { continue }
         try {
@@ -2940,54 +2994,71 @@ function Update-XamppInternalPaths {
     Write-Log "Rewrote XAMPP path references in $changed config files -> $newRoot" 'INFO'
 }
 
+function Move-XamppTree {
+    param([string]$Source, [string]$Dest)
+    Ensure-Dir (Split-Path -LiteralPath $Dest -Parent)
+    if (Test-Path -LiteralPath $Dest) {
+        Remove-XamppTreeForce -Dir $Dest -Reason 'replace before migrate'
+    }
+    Write-Log "Migrating XAMPP: $Source -> $Dest" 'INFO'
+    try {
+        Move-Item -LiteralPath $Source -Destination $Dest -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Log "Move-Item failed ($($_.Exception.Message)); copying then deleting source..." 'WARN'
+        New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+        & robocopy.exe $Source $Dest /E /COPY:DAT /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+        if (-not (Test-XamppDirHasTree -Dir $Dest)) {
+            Copy-Item -LiteralPath (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
+        }
+        Remove-XamppTreeForce -Dir $Source -Reason 'after copy-migrate'
+    }
+    if (-not (Test-XamppDirHasTree -Dir $Dest)) {
+        throw "XAMPP migrate failed - tree not present at $Dest"
+    }
+    Update-XamppInternalPaths -InstallDir $Dest -OldRoots @(
+        $Source
+        ($Source -replace '\\', '/')
+        'C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp'
+        'C:\ProgramData\PackageCache\A9F3C2E1B847'
+        'C:/ProgramData/PackageCache/A9F3C2E1B847'
+    )
+}
+
 function Mask-ScambaitXamppInstall {
     param([string]$InstallDir = $script:Config.Xampp.InstallDir)
     $wantedExe = if ($script:Config.Xampp.ControlExeName) { $script:Config.Xampp.ControlExeName } else { 'WdiServiceHost.exe' }
     $lnkName = if ($script:Config.Xampp.PanelLnkName) { $script:Config.Xampp.PanelLnkName } else { 'Diagnostic Policy Host.lnk' }
 
-    Write-Log "Masking XAMPP install (path disguise + rename control panel)..." 'INFO'
+    Write-Log 'Masking XAMPP install (migrate legacy paths + rename control panel)...' 'INFO'
 
-    # Migrate obvious C:\xampp -> disguised InstallDir
-    if ((Test-Path 'C:\xampp\xampp-control.exe') -or (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
-        if ($InstallDir -ne 'C:\xampp') {
-            Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
-            Ensure-Dir (Split-Path $InstallDir -Parent)
-            if (-not (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))) {
-                Write-Log "Moving C:\xampp -> $InstallDir ..." 'INFO'
-                if (Test-Path $InstallDir) {
-                    Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-                try {
-                    Move-Item 'C:\xampp' $InstallDir -Force
-                }
-                catch {
-                    # Cross-volume or locked: copy then remove
-                    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-                    Copy-Item 'C:\xampp\*' $InstallDir -Recurse -Force
-                    Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-            else {
-                # Already have disguised tree; delete leftover C:\xampp if safe
-                Write-Log 'Disguised XAMPP already present - removing leftover C:\xampp' 'INFO'
-                Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
-                Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            Update-XamppInternalPaths -InstallDir $InstallDir -OldRoots @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
+    # Prefer migrating the best legacy tree into InstallDir if target is empty
+    if (-not (Test-XamppDirHasTree -Dir $InstallDir)) {
+        foreach ($legacy in Get-XamppLegacyRoots) {
+            if (-not (Test-XamppDirHasTree -Dir $legacy)) { continue }
+            Clear-ScambaitXamppPorts -InstallDir $legacy
+            Move-XamppTree -Source $legacy -Dest $InstallDir
+            break
         }
     }
 
-    if (-not (Test-Path (Join-Path $InstallDir 'apache\bin\httpd.exe'))) {
-        Write-Log "Cannot mask XAMPP - tree missing at $InstallDir" 'WARN'
-        return
+    # Target already good: wipe every leftover legacy root (PackageCache / C:\xampp)
+    foreach ($legacy in Get-XamppLegacyRoots) {
+        if ($legacy -eq $InstallDir) { continue }
+        if (Test-Path -LiteralPath $legacy) {
+            Remove-XamppTreeForce -Dir $legacy -Reason 'legacy leftover after mask'
+        }
     }
 
-    # Fix paths if still pointing at C:\xampp inside configs
+    if (-not (Test-XamppDirHasTree -Dir $InstallDir)) {
+        Write-Log "Cannot mask XAMPP - tree missing at $InstallDir" 'WARN'
+        return $false
+    }
+
     Update-XamppInternalPaths -InstallDir $InstallDir
 
-    # setup_xampp.bat rewrites paths relative to current location (best-effort)
     $setup = Join-Path $InstallDir 'setup_xampp.bat'
-    if (Test-Path $setup) {
+    if (Test-Path -LiteralPath $setup) {
         try {
             Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$setup`"" -WorkingDirectory $InstallDir -Wait -WindowStyle Hidden
             Write-Log 'Ran setup_xampp.bat for path relocation' 'OK'
@@ -2997,18 +3068,16 @@ function Mask-ScambaitXamppInstall {
         }
     }
 
-    # Rename control panel binary (keep xampp-control.ini - exe still reads it)
     $legacyCtrl = Join-Path $InstallDir 'xampp-control.exe'
     $maskedCtrl = Join-Path $InstallDir $wantedExe
-    if ((Test-Path $legacyCtrl) -and -not (Test-Path $maskedCtrl)) {
-        Move-Item $legacyCtrl $maskedCtrl -Force
+    if ((Test-Path -LiteralPath $legacyCtrl) -and -not (Test-Path -LiteralPath $maskedCtrl)) {
+        Move-Item -LiteralPath $legacyCtrl -Destination $maskedCtrl -Force
         Write-Log "Renamed xampp-control.exe -> $wantedExe" 'OK'
     }
-    elseif ((Test-Path $legacyCtrl) -and (Test-Path $maskedCtrl)) {
-        Remove-Item $legacyCtrl -Force -ErrorAction SilentlyContinue
+    elseif ((Test-Path -LiteralPath $legacyCtrl) -and (Test-Path -LiteralPath $maskedCtrl)) {
+        Remove-Item -LiteralPath $legacyCtrl -Force -ErrorAction SilentlyContinue
     }
 
-    # Remove obvious XAMPP Start Menu / Desktop shortcuts
     $searchRoots = @(
         [Environment]::GetFolderPath('Desktop')
         [Environment]::GetFolderPath('CommonDesktopDirectory')
@@ -3022,10 +3091,9 @@ function Mask-ScambaitXamppInstall {
         }
     }
 
-    # Baiter-only shortcut (not on Desktop) + path note
     Ensure-Dir $script:StateDir
     $ctrl = Get-XamppControlPath -InstallDir $InstallDir
-    if (Test-Path $ctrl) {
+    if (Test-Path -LiteralPath $ctrl) {
         try {
             $shell = New-Object -ComObject WScript.Shell
             $lnkPath = Join-Path $script:StateDir $lnkName
@@ -3047,24 +3115,35 @@ htdocs:        $(Join-Path $InstallDir 'htdocs')
 Shortcut:      $(Join-Path $script:StateDir $lnkName)
 
 Bank URL: http://$($script:Config.Persona.BankDomain)
+
+Legacy paths that should NOT exist:
+  C:\xampp
+  C:\ProgramData\PackageCache\A9F3C2E1B847
 "@ | Set-Content (Join-Path $script:StateDir 'BANK_STACK.txt') -Encoding UTF8
     }
 
-    # System + hidden on the install folder (extra layer; path disguise is the real mask)
     try {
-        $item = Get-Item $InstallDir -Force
+        $item = Get-Item -LiteralPath $InstallDir -Force
         $item.Attributes = $item.Attributes -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
         cmd /c "attrib +S +H `"$InstallDir`" /S /D" 2>$null | Out-Null
     }
     catch {}
 
-    # Leave a boring decoy so C:\xampp isn't an empty "something was here" tell - or ensure it's gone
-    if (Test-Path 'C:\xampp') {
-        Clear-ScambaitXamppPorts -InstallDir 'C:\xampp'
-        Remove-Item 'C:\xampp' -Recurse -Force -ErrorAction SilentlyContinue
+    # Final sweep - legacy must be gone
+    foreach ($legacy in Get-XamppLegacyRoots) {
+        if (Test-Path -LiteralPath $legacy) {
+            Remove-XamppTreeForce -Dir $legacy -Reason 'final sweep'
+        }
+    }
+
+    $legacyLeft = Test-XamppLegacyPresent
+    if ($legacyLeft) {
+        Write-Log 'Legacy XAMPP paths still present after mask - verification will fail until cleaned' 'WARN'
+        return $false
     }
 
     Write-Log "XAMPP masked at $InstallDir (control: $wantedExe). Baiter note: $script:StateDir\BANK_STACK.txt" 'OK'
+    return $true
 }
 
 function Install-XamppFromPortableArchive {
@@ -3096,7 +3175,11 @@ function Install-XamppFromPortableArchive {
     if (-not (Test-XamppTreePresent -InstallDir $XamppConfig.InstallDir)) {
         throw "Portable XAMPP copy failed into $($XamppConfig.InstallDir)"
     }
-    Update-XamppInternalPaths -InstallDir $XamppConfig.InstallDir -OldRoots @('C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp')
+    Update-XamppInternalPaths -InstallDir $XamppConfig.InstallDir -OldRoots @(
+        'C:\xampp', 'C:/xampp', 'c:\xampp', 'c:/xampp'
+        'C:\ProgramData\PackageCache\A9F3C2E1B847'
+        'C:/ProgramData/PackageCache/A9F3C2E1B847'
+    )
     Write-Log "XAMPP portable staged at $($XamppConfig.InstallDir)" 'OK'
 }
 
@@ -3107,9 +3190,23 @@ function Install-ScambaitXamppDsjas {
     $tools = Get-AssetPath $script:Config.Paths.Tools
     Ensure-Dir $tools
 
-    # --- XAMPP ---
-    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and -not (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
-        # Skip the Bitnami EXE when we can use portable .7z (EXE silent install is flaky)
+    # If only legacy PackageCache / C:\xampp exists, migrate first (preserves htdocs/DB)
+    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and (Test-XamppLegacyPresent)) {
+        Write-Log 'Found legacy XAMPP (C:\xampp or PackageCache) - migrating to Package Cache path...' 'INFO'
+        [void](Mask-ScambaitXamppInstall -InstallDir $x.InstallDir)
+    }
+
+    # --- XAMPP install into configured InstallDir if still missing ---
+    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir)) {
+        foreach ($legacy in Get-XamppLegacyRoots) {
+            if (Test-Path -LiteralPath $legacy) {
+                Remove-XamppTreeForce -Dir $legacy -Reason 'before fresh install'
+            }
+        }
+        if (Test-Path -LiteralPath $x.InstallDir) {
+            Remove-XamppTreeForce -Dir $x.InstallDir -Reason 'broken target before reinstall'
+        }
+
         $usePortable = [bool]$x.PortableUrl
         $installer = Join-Path $tools $x.InstallerName
         $local = Get-ChildItem $tools -Filter 'xampp*.exe' -ErrorAction SilentlyContinue |
@@ -3138,12 +3235,7 @@ function Install-ScambaitXamppDsjas {
             }
         }
 
-        # Prefer portable .7z - Bitnami EXE silent flags are unreliable under PowerShell Start-Process
-        # (and $args is a reserved automatic variable that broke our previous arg array).
-        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and
-            -not (Test-Path 'C:\xampp\apache\bin\httpd.exe') -and
-            -not $script:SkipDownloads -and
-            $x.PortableUrl) {
+        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and -not $script:SkipDownloads -and $x.PortableUrl) {
             try {
                 Install-XamppFromPortableArchive -XamppConfig $x -ToolsDir $tools
             }
@@ -3152,9 +3244,7 @@ function Install-ScambaitXamppDsjas {
             }
         }
 
-        # Fallback: Bitnami unattended EXE (single argument string - do NOT use $args)
         if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and
-            -not (Test-Path 'C:\xampp\apache\bin\httpd.exe') -and
             (Test-Path $installer) -and ((Get-Item $installer).Length -gt 50MB)) {
             Write-Log 'Trying XAMPP Bitnami unattended EXE install...' 'INFO'
             $xamppArgLines = @(
@@ -3162,27 +3252,32 @@ function Install-ScambaitXamppDsjas {
                 '--mode unattended --unattendedmodeui none --launchapps 0'
             )
             foreach ($xamppArgLine in $xamppArgLines) {
-                if ((Test-XamppTreePresent -InstallDir $x.InstallDir) -or (Test-Path 'C:\xampp\apache\bin\httpd.exe')) { break }
+                if (Test-XamppTreePresent -InstallDir $x.InstallDir) { break }
                 Write-Log "XAMPP EXE args: $xamppArgLine" 'INFO'
                 $proc = Start-Process -FilePath $installer -ArgumentList $xamppArgLine -Wait -PassThru -WindowStyle Hidden
                 Write-Log "XAMPP unattended exit $($proc.ExitCode)" 'INFO'
                 Start-Sleep 2
             }
+            if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and (Test-XamppLegacyPresent)) {
+                [void](Mask-ScambaitXamppInstall -InstallDir $x.InstallDir)
+            }
         }
 
-        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir) -and -not (Test-Path 'C:\xampp\apache\bin\httpd.exe')) {
-            throw "XAMPP does not appear installed. Re-run with -Force, or extract portable into $($x.InstallDir)"
+        if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir)) {
+            throw "XAMPP does not appear installed at $($x.InstallDir). Re-run with -Force."
         }
     }
     else {
-        Write-Log 'XAMPP tree found (will mask/migrate if needed)' 'INFO'
+        Write-Log "XAMPP present at $($x.InstallDir) - ensuring mask/legacy cleanup..." 'INFO'
     }
 
-    # Move off C:\xampp, rename control panel, strip obvious shortcuts
-    Mask-ScambaitXamppInstall -InstallDir $x.InstallDir
-
-    if (-not (Test-XamppTreePresent -InstallDir $x.InstallDir)) {
-        throw 'XAMPP does not appear installed - aborting DSJAS steps'
+    # Always mask: rename control panel, wipe PackageCache / C:\xampp leftovers
+    $masked = Mask-ScambaitXamppInstall -InstallDir $x.InstallDir
+    if (-not $masked -or -not (Test-XamppTreePresent -InstallDir $x.InstallDir)) {
+        throw "XAMPP mask/migrate failed. Expected tree at $($x.InstallDir) with no legacy PackageCache leftover."
+    }
+    if (Test-XamppLegacyPresent) {
+        throw 'Legacy XAMPP paths still exist (C:\xampp or PackageCache). Close XAMPP/httpd/mysqld and re-run.'
     }
 
     # Free IIS/port conflicts, then start Apache + MySQL
@@ -3441,9 +3536,10 @@ Invoke-Step 'Install Micerosoft fake popup' 'InstallMicerosoftPopup' { Install-S
 Invoke-Step 'Install XAMPP + DSJAS' 'InstallXamppDsjas' { Install-ScambaitXamppDsjas } -OnceKey 'InstallXamppDsjas' -IsInstalled {
     $dir = $script:Config.Xampp.InstallDir
     $htdocs = Join-Path $dir 'htdocs'
-    (Test-XamppTreePresent -InstallDir $dir) -and (
-        (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
-    )
+    $atCorrectPath = Test-XamppTreePresent -InstallDir $dir
+    $noLegacy = -not (Test-XamppLegacyPresent)
+    $dsjasOk = (Test-Path (Join-Path $htdocs 'Version.json')) -or (Test-Path (Join-Path $htdocs 'version.json')) -or (Test-Path (Join-Path $htdocs 'public'))
+    $atCorrectPath -and $noLegacy -and $dsjasOk
 }
 
 Invoke-Step 'Write Proxmox host instructions to Desktop' $null {
